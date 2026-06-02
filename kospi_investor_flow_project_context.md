@@ -3,9 +3,9 @@
 **Project name:** KOSPI Investor Flow Intelligence Platform  
 **Primary market:** KOSPI  
 **Document purpose:** Reusable context document for coding-agent sessions  
-**Last updated:** 2026-05-29  
-**Current phase:** Phases 1–5 backend completed (MVP scope); frontend scaffolded. Roadmap MVP complete; remaining items are real-data integration, ops maturity, and frontend build.  
-**Document version:** 0.4
+**Last updated:** 2026-06-02  
+**Current phase:** MVP complete and **deploying**. Real KOSPI data loaded (948 tickers, ~5y) and models trained on the user's Korean-IP host. Code on GitHub. **Railway** backend (FastAPI) + Postgres are **online**; **Vercel** frontend wiring in progress. Remaining: finish/verify Vercel + prod data, API auth, ops maturity.  
+**Document version:** 0.5
 
 ---
 
@@ -1503,6 +1503,38 @@ Next recommended task:
 
 ---
 
+### 2026-06-02 — Real data loaded; deploying to Railway (backend) + Vercel (frontend)
+
+Status: in progress. Backend + Postgres are LIVE on Railway after iterative deploy fixes; frontend on Vercel is being wired up by the user.
+
+**Repo / git:** code is on GitHub at `https://github.com/HajinHyukson/Acquin.git` (remote `origin`, **HTTPS**, branch `main`). Commit identity `FaustCalc <hajinson1346@gmail.com>` (the machine's global git config; HTTPS creds are cached so `git push` works non-interactively). Latest commits this session: deploy config + the Railway fixes below (HEAD ≈ `f24d411`). A new session CAN push (init already done; `git push` works).
+
+**Real data:** the user backfilled real KOSPI data on their **Korean-IP host** (pykrx) — 948 stocks, ~1.64M price rows, ~4.85M investor-flow rows, foreign holdings, real KOSPI index; ran features/train/predict (LightGBM auto-selected; it's installed on their host). So `train`/`predict`/analytics now run on real data there. The hosted Postgres on Railway is **separate** and must be loaded via `copy-db` from the KR host (or by pointing ingestion at it).
+
+**Railway deploy — fixes applied (each pushed to GitHub):**
+- `requirements.txt` added (Nixpacks installs from it) — fixed `ModuleNotFoundError: numpy` (Nixpacks ignored pyproject; Railway only auto-detects a root Dockerfile, ours is nested).
+- `railway.json` → builds from `infra/docker/Dockerfile`; `.railwayignore` keeps the 2 GB DB / node_modules / `.env` out of uploads.
+- Dockerfile: removed `VOLUME` (Railway rejects it), dropped the hardcoded SQLite default, `/app/data` fallback dirs created, copies `apps/`.
+- `serve` start command: removed `--port` (Railway passed a literal un-expanded `$PORT`). Added `cli.resolve_port()` which reads the `PORT` env and tolerates a literal `$PORT`/`${PORT}` — so it works regardless of how the platform invokes it (`Procfile`/Dockerfile/dashboard custom start). Tests in `test_cli_serve.py`.
+- `config._default_database_url` adopts a platform-provided `DATABASE_URL` when `KOSPI_DATABASE_URL` is unset; `db.normalize_db_url` rewrites `postgres://`→`postgresql+psycopg://`.
+
+**Current live state:** Railway web service healthcheck (`/health`) green; Postgres provisioned. The user must still: set `KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}` on the web service (verify), `copy-db` the data into that Postgres, generate the public domain, and remove any leftover dashboard **Custom Start Command** (the code now tolerates it, but cleaner to clear it so the Dockerfile CMD `serve --host 0.0.0.0` is used).
+
+**Vercel (frontend) — in progress, steps given to user:** import `HajinHyukson/Acquin` → **Root Directory `apps/web`** → env `NEXT_PUBLIC_API_BASE = <Railway public URL>` → deploy → then set `KOSPI_CORS_ORIGINS` on Railway to the Vercel domain.
+
+Tests: suite was green at 101; `test_cli_serve.py` adds 4 (serve port resolution) → ~105. (Full suite not re-run after the last cli edit; `test_cli_serve` + `test_config` pass.)
+
+Known issues / blockers (deploy):
+- **API is unauthenticated** — once the Railway/Vercel URLs are public anyone can read/modify watchlists. Recommended next: add API-key auth + rate limiting (offered, user hasn't accepted yet).
+- Railway Postgres may be **empty** until the user runs `copy-db` (or ingests to it) — frontend shows 0 stocks / "예측 데이터 없음" until then.
+- Verify `KOSPI_DATABASE_URL` is actually set on the Railway web service, else it serves an ephemeral SQLite.
+- Railway is usage-billed (no permanent free tier).
+
+Next recommended task:
+- Help the user finish Vercel + verify prod data flow (CORS, `NEXT_PUBLIC_API_BASE`, `copy-db` into Railway Postgres), then **add API auth + rate limiting** (§20 step 4) before the app is shared. Then the rest of §20 step 4 (Airflow/Prefect, MLflow, real alert channels, legal sign-off).
+
+---
+
 ## 17. Decision log
 
 | Date | Decision | Rationale |
@@ -1528,6 +1560,9 @@ Next recommended task:
 | 2026-05-31 | pykrx provider degrades gracefully (retry/backoff, returns [] on blocked endpoints) instead of failing. | KRX endpoints are flaky/IP-blocked; the daily pipeline should ingest what it can and log the rest, not abort. |
 | 2026-05-31 | Derive pykrx `trading_value` as close×volume when 거래대금 is absent. | pykrx single-ticker OHLCV omits 거래대금; an approximation keeps turnover features populated until a true source is wired. |
 | 2026-05-31 | Real data sourced via pykrx on a Korean-IP host (user's choice); paced + chunked backfill added. | No API key needed; KRX endpoints reachable from KR IPs. Pacing avoids rate-limit empties; chunked backfill is resumable for wide multi-year loads. |
+| 2026-06-02 | Split deploy: **frontend → Vercel, backend+Postgres → Railway**, ingestion stays on the KR host. | Vercel can't run the pandas/ML backend or hold the ~2 GB DB; Railway runs the Docker image with managed Postgres. User chose Railway over the Render blueprint (`render.yaml` kept as an alternative). |
+| 2026-06-02 | `serve` reads `PORT` from env and tolerates a literal un-expanded `$PORT`; start command omits `--port`. | Railway ran the start command without shell expansion, passing `$PORT` literally and crashing argparse. `resolve_port()` makes it robust regardless of builder/start-command source. |
+| 2026-06-02 | Adopt platform `DATABASE_URL` + rewrite `postgres://`→`postgresql+psycopg://`. | Railway/Render hand out un-prefixed `postgres://` DSNs; this makes them work without manual edits and with psycopg3. |
 
 ---
 
@@ -1546,12 +1581,13 @@ Next recommended task:
 | Sample provider data is synthetic | Open (by design) | Must never be shown to users as real data; use `pykrx`/`licensed` for real data. |
 | Sample trading calendar ignores KR market holidays | Open | Uses Mon–Fri business days; real providers carry the true calendar. |
 | Monetary columns use Float not Numeric | Open | Acceptable for MVP; revisit for exact-precision KRW in production Postgres. |
-| ML metrics computed on synthetic data | Open | Sample data is random; IC/RMSE are placeholders until retrained on real data. |
+| ML metrics computed on synthetic data | Resolved on KR host | Real data backfilled + models retrained on the user's Korean-IP host (2026-06-02). Railway prod Postgres still needs the data loaded via `copy-db`. |
 | KOSPI benchmark is a cap-weighted proxy | Resolved (path); data blocked | Index data path built (`fact_index_daily` + benchmark prefers real index, falls back to proxy). Real index numbers still blocked from this env — needs Korean-IP host or licensed feed. |
 | Real KRX index endpoint blocked from this env | Open | pykrx `get_index_ohlcv`/`get_index_ticker_list` IP-blocked here (2026-05-31), like cap/flows. Sample index works offline. |
-| Frontend not build-verified | Open | `apps/web` scaffolded but no `npm install`/build was run; charts are tables for now. |
+| Frontend not build-verified | Resolved | `apps/web` is a full Next.js + ECharts app, `next build` clean (10 routes); deploying to Vercel. |
 | Phase 5 hardening incomplete | Mostly resolved | Scheduling, registry, drift, alerting, watchlists, security + licensing review docs now done. Remaining: licensed feed, Airflow/Prefect, API auth, MLflow. |
-| API has no authentication/rate limiting | Open | MVP is unauthenticated; add auth + rate limit + TLS before public/commercial deployment (see docs/SECURITY.md). |
+| API has no authentication/rate limiting | Open — **live-deploy blocker** | Railway/Vercel URLs are becoming public; anyone with the URL can read/modify watchlists. Add API-key auth + rate limiting next (see docs/SECURITY.md). |
+| Railway prod Postgres may be empty | Open (deploy) | Provisioned but not auto-populated; run `copy-db --dest <DATABASE_PUBLIC_URL>` from the KR host, and ensure the web service has `KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}`. |
 | Preferred-share exclusion only | Open | Screener excludes preferred shares; ETF/SPAC/REIT exclusion still needs an instrument-type field/source. |
 
 ---
@@ -1618,60 +1654,67 @@ Use this brief to start the next coding-agent session.
 ```text
 You are working on the KOSPI Investor Flow Intelligence Platform.
 
-Read the project context document first. The Phases 0–5 MVP is CODE-COMPLETE; see
-the 2026-05-29/05-31 progress-log entries. What exists and runs offline on the
-deterministic `sample` provider, with 84 passing tests (`python -m pytest`):
-- Packages: kospi_flow.core/data/analytics/ml/api/jobs/alerts.
-- CLI: python -m kospi_flow.cli {info,init-db,ingest,features,train,predict,daily,
-  drift,models,scheduler,validate}
-- FastAPI (uvicorn apps.api.main:app): stocks/market/screeners/analytics/
-  projection/status/watchlists/models endpoints; CORS; envelope responses.
-- Phase 5: daily orchestrator + retry, KST scheduler + crontab, alerting
-  (console/file/webhook + rules), model registry + PSI drift, watchlists,
-  Docker/Compose + healthcheck, docs/{SECURITY,DATA_LICENSING,SCHEDULING}.md.
-- Benchmark: real market index path (`fact_index_daily`); benchmark prefers the
-  real index and falls back to the cap-weighted proxy. `/market/index` endpoint.
-- apps/web: minimal Next.js scaffold (NOT build-verified here).
+Read this context doc first (esp. the 2026-06-02 progress entries). The Phases
+0–5 MVP is CODE-COMPLETE and the app is BEING DEPLOYED. ~105 tests
+(`python -m pytest`; last full run green at 101, +4 serve-port tests).
 
-DATA-SOURCING DECISION (made 2026-05-31): the user chose to run pykrx from a
-**Korean-IP host** (no API key). Tooling is ready — pacing
-(`KOSPI_PYKRX_REQUEST_DELAY`), a restartable chunked `backfill` command, and the
-runbook `docs/REAL_DATA.md`. Only plain stock OHLCV is reachable from THIS
-environment, so the real backfill must run on the user's KR host.
+WHAT EXISTS
+- Backend: kospi_flow.{core,data,analytics,ml,api,jobs,alerts}. FastAPI
+  (apps.api.main:app) — stocks/market/screeners/analytics/projection/status/
+  watchlists/models endpoints + /market/{top-picks,closes,index}, CORS, envelope
+  responses. CLI: info/init-db/ingest/backfill/features/train/predict/daily/
+  drift/models/scheduler/serve/copy-db/validate.
+- Analytics (the product core): per-stock flow→price relationship —
+  /correlations, /events, and /flow-return-profile (quintile analysis); surfaced
+  on the stock page (heatmap + quintile chart + event study).
+- Frontend: apps/web Next.js + ECharts, BUILD-VERIFIED (10 routes). Home = today's
+  top ML picks (notable buys) + sparklines + stock search + index chart; stock
+  detail (price/flow/foreign + flow→price analytics + ML projection + add-to-
+  watchlist); rankings/screener/watchlists/models/data-status; nav freshness badge.
+- Benchmark prefers the real KOSPI index (fact_index_daily), falls back to proxy.
 
-Recommended order for the next session:
+DEPLOYMENT STATE (in progress — see 2026-06-02 entry)
+- Repo: github.com/HajinHyukson/Acquin (origin, HTTPS, branch main). Git is
+  initialized here; `git push` works (creds cached; identity FaustCalc
+  <hajinson1346@gmail.com>). Commit + push as you change deploy files.
+- Backend → Railway (Docker via railway.json + infra/docker/Dockerfile),
+  Postgres provisioned, /health green. Frontend → Vercel (Root Directory
+  apps/web, env NEXT_PUBLIC_API_BASE = Railway URL), being wired by the user.
+- Deploy plumbing done: requirements.txt (Nixpacks), .railwayignore, render.yaml
+  (alt), copy-db tool, cli.resolve_port() ($PORT tolerance), DATABASE_URL adoption
+  + postgres:// normalization. Full runbook: docs/DEPLOYMENT.md.
 
-1. REAL DATA — runs on the user's Korean-IP host (see docs/REAL_DATA.md):
-     KOSPI_DATA_SOURCE=pykrx python -m kospi_flow.cli backfill --start 2019-01-01 --end 2024-12-31
-   then features/train/predict/drift. The pykrx provider is validated/hardened,
-   paced, and the index path is ready. If you (the agent) are NOT on a KR IP you
-   cannot execute this — confirm the user has run it, then continue from the
-   populated DB. Current ML metrics + PSI drift are placeholders from synthetic
-   data until this runs.
+REAL DATA: lives on the user's Korean-IP host (pykrx; 948 tickers, ~5y, models
+trained — LightGBM). This agent environment can only reach stock OHLCV (cap/
+flow/foreign/index are KRX-IP-blocked), so YOU cannot ingest — the user runs it.
+The Railway Postgres must be loaded via `copy-db` from the KR host.
 
-2. [DONE 2026-05-31] Market-index data path built; benchmark prefers the real
-   index over the proxy. Remaining sub-task: ingest the REAL KOSPI index once a
-   reachable source exists (sample index is synthetic).
+DO NEXT (in order)
+1. Finish/verify the live deploy with the user: Railway web has
+   KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}; data loaded into Railway
+   Postgres (copy-db) or ingested to it; Vercel NEXT_PUBLIC_API_BASE set; Railway
+   KOSPI_CORS_ORIGINS = the Vercel domain. Help debug deploy logs as needed.
+2. **API auth + rate limiting** (BLOCKER for public exposure) — the URLs are
+   public and the API is unauthenticated (anyone can read/modify watchlists).
+   Add an API-key dependency (KOSPI_API_KEY setting) + simple rate limiting; have
+   the frontend send the key. This is the immediate §20-step-4 priority.
+3. Rest of production maturity (§20 step 4): Airflow/Prefect scheduling, MLflow
+   registry + retrain-on-drift, real alert channels (email/Kakao/Telegram),
+   LicensedProvider for a licensed feed, legal/data-license sign-off.
+4. Optional polish: sector filter / sortable tables on picks & rankings; a
+   compare view.
 
-3. FRONTEND (not blocked). cd apps/web && npm install && npm run dev; fix any
-   build issues, then add charts (TradingView Lightweight Charts or ECharts) to
-   the stock page for price, investor-flow, foreign-holding, and the new
-   `/market/index` benchmark overlay. Add /models, /data-status, /watchlists pages.
+CANNOT do from this env: real pykrx ingest (KR-IP only), and running the live
+Railway/Vercel/Postgres (the user owns those) — you make code changes, push to
+GitHub, and the user redeploys. Confirm with the user before assuming prod state.
 
-4. PRODUCTION MATURITY (was Phase 5 remainder). Implement LicensedProvider for a
-   licensed feed; migrate scheduling to Airflow/Prefect; add API auth + rate
-   limiting + TLS (see docs/SECURITY.md); migrate the registry to MLflow with
-   automated retrain-on-drift; add real notifier integrations (email/Kakao/
-   Telegram); obtain the legal/data-license sign-off (see docs/DATA_LICENSING.md).
+Important product constraint (unchanged): do not label 개인/기관 cumulative net
+buy as actual holdings — only 외국인 보유량/보유비율 are real holdings; cumulative
+개인/기관 series are a net-buy position proxy (§19.4). Already wired into API
+metadata + the frontend.
 
-Important product constraint (unchanged):
-Do not label 개인/기관 cumulative net buy as actual holdings. Only foreign
-holdings are real holdings (verified foreign-ownership data). Cumulative 개인/기관
-series are a net-buy position proxy (see §19.4). These labels are already wired
-into the API metadata and the frontend stock page — keep them.
-
-At completion, update this context document (status, deliverables, files,
-decisions, known issues, next task) using the section 21 template.
+At completion, update this context doc (status, progress log, decisions, known
+issues, this brief) using the section 21 template.
 ```
 
 ---
