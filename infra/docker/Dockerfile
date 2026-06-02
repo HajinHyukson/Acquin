@@ -13,13 +13,15 @@ COPY scripts ./scripts
 # Install with the Postgres driver for production deployments.
 RUN pip install --no-cache-dir -e ".[postgres]"
 
+# Local fallback storage (used only if no KOSPI_DATABASE_URL / DATABASE_URL is
+# set). Production uses managed Postgres, so no persistent volume is needed —
+# Railway's builder rejects the Docker VOLUME instruction anyway.
 ENV KOSPI_DATA_SOURCE=sample \
-    KOSPI_DATABASE_URL=sqlite:////data/kospi_flow.db \
-    KOSPI_RAW_DATA_PATH=/data/raw \
-    KOSPI_PROCESSED_DATA_PATH=/data/processed \
+    KOSPI_RAW_DATA_PATH=/app/data/raw \
+    KOSPI_PROCESSED_DATA_PATH=/app/data/processed \
     PORT=8000
+RUN mkdir -p /app/data/raw /app/data/processed
 
-VOLUME ["/data"]
 EXPOSE 8000
 
 # Honor the platform-provided $PORT; bind all interfaces for container hosts.
