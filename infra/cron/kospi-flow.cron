@@ -1,0 +1,22 @@
+# KOSPI Investor Flow — sample crontab (times in Korea time / KST).
+# Install with:  crontab infra/cron/kospi-flow.cron   (ensure the host TZ is
+# Asia/Seoul, or wrap commands with `TZ=Asia/Seoul`). Alternatively run the
+# built-in scheduler:  python -m kospi_flow.cli scheduler
+#
+# Adjust REPO and the date window (here: trailing ~120 days ending today).
+# These mirror kospi_flow/jobs/scheduler.py DEFAULT_SCHEDULE (context doc §5).
+
+REPO=/app
+PY=/usr/local/bin/python
+
+# 15:50 KST — preliminary OHLCV after the close
+50 15 * * 1-5 cd $REPO && KOSPI_DATA_SOURCE=pykrx $PY -m kospi_flow.cli ingest --freshness PRELIMINARY --start $(date -d '120 days ago' +\%Y-\%m-\%d) --end $(date +\%Y-\%m-\%d) >> /var/log/kospi/preliminary.log 2>&1
+
+# 16:30 KST — first-pass EOD
+30 16 * * 1-5 cd $REPO && KOSPI_DATA_SOURCE=pykrx $PY -m kospi_flow.cli ingest --freshness FIRST_EOD --start $(date -d '120 days ago' +\%Y-\%m-\%d) --end $(date +\%Y-\%m-\%d) >> /var/log/kospi/first_eod.log 2>&1
+
+# 18:30 KST — final reconciled flows + features + ML inference + validate + alerts
+30 18 * * 1-5 cd $REPO && KOSPI_DATA_SOURCE=pykrx $PY -m kospi_flow.cli daily --horizons 5 --start $(date -d '120 days ago' +\%Y-\%m-\%d) --end $(date +\%Y-\%m-\%d) >> /var/log/kospi/daily.log 2>&1
+
+# Sunday 02:00 KST — weekly retrain
+0 2 * * 0 cd $REPO && KOSPI_DATA_SOURCE=pykrx $PY -m kospi_flow.cli train --horizon 5 >> /var/log/kospi/train.log 2>&1

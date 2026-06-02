@@ -1,0 +1,55 @@
+# Docker Compose for the MVP. SQLite is used by default (single `api` service);
+# uncomment the `db` service and switch KOSPI_DATABASE_URL to run on PostgreSQL.
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      KOSPI_DATA_SOURCE: sample
+      KOSPI_DATABASE_URL: sqlite:////data/kospi_flow.db
+      # For PostgreSQL instead:
+      # KOSPI_DATABASE_URL: postgresql+psycopg://kospi:kospi@db:5432/kospi_flow
+      KOSPI_CORS_ORIGINS: "*"
+      KOSPI_ALERT_CHANNEL: console
+    volumes:
+      - kospi_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8000/health').status_code==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # depends_on:
+    #   - db
+
+  # Optional always-on scheduler running the KST timetable (context doc §5).
+  # scheduler:
+  #   build:
+  #     context: ../..
+  #     dockerfile: infra/docker/Dockerfile
+  #   command: ["python", "-m", "kospi_flow.cli", "scheduler"]
+  #   environment:
+  #     TZ: Asia/Seoul
+  #     KOSPI_DATABASE_URL: sqlite:////data/kospi_flow.db
+  #   volumes:
+  #     - kospi_data:/data
+  #   restart: unless-stopped
+
+  # db:
+  #   image: timescale/timescaledb:latest-pg16
+  #   environment:
+  #     POSTGRES_USER: kospi
+  #     POSTGRES_PASSWORD: kospi
+  #     POSTGRES_DB: kospi_flow
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - kospi_pg:/var/lib/postgresql/data
+
+volumes:
+  kospi_data:
+  # kospi_pg:

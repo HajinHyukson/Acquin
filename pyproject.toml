@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kospi-investor-flow"
+version = "0.3.0"
+description = "KOSPI Investor Flow Intelligence Platform (data, analytics, ML, API)"
+readme = "README.md"
+requires-python = ">=3.11"
+# Full runtime set so a fresh `pip install -e .` runs the API + CLI end-to-end.
+dependencies = [
+    "SQLAlchemy>=2.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+    "alembic>=1.12",
+    "pyarrow>=12.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Prototype real-data source. Acceptable for MVP only (see context doc §4).
+pykrx = ["pykrx>=1.0.45"]
+# PostgreSQL driver (production DB). Enables postgresql+psycopg:// URLs.
+postgres = ["psycopg[binary]>=3.1"]
+# Optional faster gradient-boosting backend (auto-used if present).
+lightgbm = ["lightgbm>=4.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+kospi-flow = "kospi_flow.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["kospi_flow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::scipy.stats.NearConstantInputWarning",
+]

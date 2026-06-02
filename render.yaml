@@ -1,0 +1,27 @@
+# Render blueprint for the KOSPI Investor Flow backend (FastAPI + Postgres).
+# Deploy: push to GitHub, then Render → New → Blueprint → pick this repo.
+# The frontend (apps/web) is deployed separately on Vercel — see docs/DEPLOYMENT.md.
+services:
+  - type: web
+    name: kospi-flow-api
+    runtime: python
+    plan: starter            # free tier works for a demo; starter+ for real use
+    buildCommand: pip install -e ".[postgres]"
+    startCommand: python -m kospi_flow.cli serve --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: KOSPI_DATABASE_URL
+        fromDatabase:
+          name: kospi-flow-db
+          property: connectionString
+      - key: KOSPI_DATA_SOURCE
+        value: sample        # API never ingests; data arrives via copy-db / the KR host
+      - key: KOSPI_CORS_ORIGINS
+        value: "*"           # CHANGE to your Vercel domain, e.g. https://kospi-flow.vercel.app
+      - key: PYTHON_VERSION
+        value: "3.12"
+
+databases:
+  - name: kospi-flow-db
+    plan: free               # ~1GB free; upgrade for the full ~2GB dataset
+    databaseName: kospi_flow
