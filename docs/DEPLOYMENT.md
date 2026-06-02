@@ -23,7 +23,42 @@ won't persist there). So this is a **split deployment**:
 
 ---
 
-## 1. Backend + database (Render)
+## 1. Backend + database (Railway)
+
+Railway's default builder is **Nixpacks**, which installs from the included
+`requirements.txt` (then runs the `Procfile` web command). This is the simplest
+path and needs no extra setup.
+
+> **If you hit `ModuleNotFoundError: No module named 'numpy'`** the deps weren't
+> installed — your build predates `requirements.txt`, or Nixpacks skipped it.
+> Fix: make sure `requirements.txt` is in the deployed commit and redeploy. To
+> use the Docker image instead (it installs `.[postgres]`), set the service
+> **Settings → Build → Builder = Dockerfile, Dockerfile Path =
+> `infra/docker/Dockerfile`** (Railway only auto-detects a Dockerfile at the repo
+> root, which is why the nested one isn't picked up automatically). `railway.json`
+> requests the Dockerfile builder, but the dashboard setting is the reliable override.
+
+1. Push the repo to GitHub.
+2. **railway.app → New Project → Deploy from GitHub repo** → pick the repo.
+   Railway reads `railway.json` and builds the Docker image.
+3. In the project, **New → Database → PostgreSQL** (adds a `Postgres` service).
+4. Open the **API service → Variables** and add:
+   - `KOSPI_DATABASE_URL` = `${{Postgres.DATABASE_URL}}`  ← reference the DB service
+   - `KOSPI_DATA_SOURCE` = `sample`  (the API never ingests)
+   - `KOSPI_CORS_ORIGINS` = your Vercel domain, e.g. `https://acquin.vercel.app`
+   (The app rewrites Railway's `postgres://…` to the psycopg3 dialect automatically.)
+5. **API service → Settings → Networking → Generate Domain** to get a public URL,
+   e.g. `https://acquin-api.up.railway.app`. Confirm `…/health` and `…/docs`.
+
+For the data load (step 2), use Railway's **public** Postgres URL: Postgres
+service → **Variables → `DATABASE_PUBLIC_URL`** (or "Connect" → public connection
+string). That's the host your KR machine connects to from outside Railway.
+
+> Railway is usage-billed (no permanent free tier); a small Postgres + web service
+> is a few dollars/month. Render's blueprint below is an alternative with a free
+> tier.
+
+## 1b. Backend + database (Render — alternative)
 
 A blueprint is included at `render.yaml` (web service + free Postgres).
 
@@ -52,7 +87,8 @@ python -m pip install -e ".[postgres]"
 python -m kospi_flow.cli copy-db --source "sqlite:///./data/kospi_flow.db" `
   --dest "postgresql://USER:PASS@HOST:5432/kospi_flow"
 ```
-(Use Render's *External* connection string. The schema is created automatically.)
+(Use the **public/external** DB URL — Railway `DATABASE_PUBLIC_URL`, or Render's
+*External* connection string. The schema is created automatically.)
 
 **B. Ingest straight to prod (recommended for ongoing updates):** on the KR host,
 point the pipeline at the hosted DB and run it there:

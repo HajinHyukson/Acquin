@@ -6,6 +6,7 @@ optional ``.env`` file. See ``.env.example`` for the documented surface.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,6 +16,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Repository root = three levels up from this file
 # (<root>/kospi_flow/core/config.py).
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_database_url() -> str:
+    """Default DB URL: explicit KOSPI_DATABASE_URL wins (handled by pydantic);
+    otherwise fall back to a platform-provided ``DATABASE_URL`` (Railway/Render/
+    Heroku set this), else a local SQLite file."""
+    return os.environ.get("DATABASE_URL") or (
+        f"sqlite:///{(REPO_ROOT / 'data' / 'kospi_flow.db').as_posix()}"
+    )
 
 
 class Settings(BaseSettings):
@@ -41,9 +51,7 @@ class Settings(BaseSettings):
     # --- Database ----------------------------------------------------------
     #: SQLAlchemy URL. Defaults to a local SQLite file for the MVP; point this
     #: at PostgreSQL/TimescaleDB for a shared deployment.
-    database_url: str = Field(
-        default=f"sqlite:///{(REPO_ROOT / 'data' / 'kospi_flow.db').as_posix()}"
-    )
+    database_url: str = Field(default_factory=_default_database_url)
     db_echo: bool = Field(default=False)
 
     # --- Storage layout ----------------------------------------------------
