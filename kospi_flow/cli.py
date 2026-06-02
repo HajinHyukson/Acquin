@@ -201,9 +201,23 @@ def cmd_scheduler(args) -> int:
     return 0
 
 
-def cmd_serve(args) -> int:
+def resolve_port(raw: str | None) -> int:
+    """Resolve the serve port robustly.
+
+    Accepts a literal port ("8080"), nothing (None), or an un-expanded shell
+    placeholder like "$PORT"/"${PORT}" (which happens when a platform runs the
+    start command without a shell). In the latter two cases we read the ``PORT``
+    environment variable, falling back to 8000.
+    """
     import os
 
+    if raw and str(raw).isdigit():
+        return int(raw)
+    env = os.environ.get("PORT", "")
+    return int(env) if env.isdigit() else 8000
+
+
+def cmd_serve(args) -> int:
     try:
         import uvicorn
     except ImportError:
@@ -212,8 +226,7 @@ def cmd_serve(args) -> int:
             '  python -m pip install "uvicorn[standard]" fastapi'
         )
         return 1
-    # Honor the platform-provided $PORT (Render/Railway/etc.) when --port is omitted.
-    port = args.port if args.port is not None else int(os.environ.get("PORT", 8000))
+    port = resolve_port(args.port)
     print(f"Serving API on http://{args.host}:{port}  (docs at /docs)")
     uvicorn.run("apps.api.main:app", host=args.host, port=port, reload=args.reload)
     return 0
@@ -354,7 +367,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="Run the FastAPI server (uvicorn)")
     p_serve.add_argument("--host", default="127.0.0.1", help="Bind host (0.0.0.0 to deploy)")
     p_serve.add_argument(
-        "--port", type=int, default=None, help="Bind port (default: $PORT or 8000)"
+        "--port",
+        type=str,
+        default=None,
+        help="Bind port (default: $PORT env or 8000; tolerates a literal $PORT)",
     )
     p_serve.add_argument(
         "--reload", action="store_true", help="Auto-reload on code changes (dev)"
