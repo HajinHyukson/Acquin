@@ -24,5 +24,6 @@ RUN mkdir -p /app/data/raw /app/data/processed
 
 EXPOSE 8000
 
-# Honor the platform-provided $PORT; bind all interfaces for container hosts.
-CMD ["sh", "-c", "python -m kospi_flow.cli serve --host 0.0.0.0 --port ${PORT:-8000}"]
+# No --port: `serve` reads $PORT from the env (set by Railway; defaults to 8000),
+# avoiding shell-expansion issues when the platform runs the command without sh.
+CMD ["python", "-m", "kospi_flow.cli", "serve", "--host", "0.0.0.0"]
