@@ -1611,19 +1611,32 @@ Open items / blockers:
   returns `flow_rows>0`/`foreign_rows>0` (not just `price_rows`). If blocked, fall
   back to Option B (same scheduler on the user's KRX-reachable machine → Railway
   **public** Postgres URL).
-- **Model bundle on Railway:** `predict`/`drift` need a `.joblib` at
-  `/app/data/processed/models/`; a fresh container has none (artifacts were trained
-  on the user's host, not in repo/Postgres). Data refresh (ingest/features) is
-  unaffected — those steps error-and-skip per `jobs/daily.py`. Recommended fix:
-  Railway Volume at `/app/data/processed` + train-on-Railway (history is now in
-  Postgres), or commit an exported bundle.
+Model bundle on Railway (RESOLVED — predictions wired):
+- Decision: **commit the trained bundles and bake them into the scheduler image**
+  (user chose to train on this machine + commit, not skip). The five LightGBM
+  bundles (`gbm_return_{1,3,5,10,20}d.joblib`, ~4.7 MB each, trained 2026-06-02)
+  are committed under `models/`; `Dockerfile.scheduler` copies them to
+  `/app/data/processed/models/`, so `predict`/`drift` work on first deploy with no
+  Volume. (A Volume mounted there would *shadow* the baked-in models — documented.)
+- Made the predicted horizons configurable (`KOSPI_PREDICT_HORIZONS`, default
+  `1,3,5,10,20`) so the scheduler refreshes **every horizon the frontend Top Picks
+  surfaces** daily, not just h=5. `scheduler.run_entry` now reads it.
+- Verified the committed `gbm_return_5d` bundle loads with the image's
+  lightgbm/sklearn (Pipeline regressor + classifier + P10/P50/P90 + drift baseline,
+  23 features). Refresh path: retrain locally → copy to `models/` → commit → redeploy.
 
-No code (`*.py`) changed → test suite unaffected (still ~105).
+Code changed this session:
+- `core/config.py` (+`predict_horizons` + `predict_horizon_list`),
+  `jobs/scheduler.py` (`run_entry` uses configured horizons),
+  `infra/docker/Dockerfile.scheduler` (COPY `models/`), `.env.example`,
+  `tests/test_phase5.py` (+2 tests), new `models/` dir (5 bundles + README).
+- Suite: **107 passed** (`python -m pytest`).
 
 Next recommended task:
 - User runs the STEP 0 reachability probe on Railway. If flows return, finish
-  Option A (clear the probe start command; attach the model Volume + bootstrap
-  `train`). If blocked, switch to Option B. Then API auth + rate limiting.
+  Option A (clear the probe start command — the scheduler then ingests + predicts
+  all horizons). If blocked, switch to Option B (same image/command on a
+  KRX-reachable host → Railway public Postgres URL). Then API auth + rate limiting.
 
 ---
 
@@ -1683,7 +1696,7 @@ Next recommended task:
 | Railway prod Postgres may be empty | Resolved | Production API returns real populated data (`n_stocks=948`, latest observed data date `2026-06-01`) through Railway Postgres. Ongoing refresh still needs a KR-host schedule or licensed ingestion path. |
 | Preferred-share exclusion only | Open | Screener excludes preferred shares; ETF/SPAC/REIT exclusion still needs an instrument-type field/source. |
 | KRX reachable from user's machine (no VPN) | Updated 2026-06-03 | User reports pykrx now reaches flow/foreign endpoints from their machine without a VPN, contradicting the 2026-06-01 "US IP blocked" finding. Reachability from **Railway's datacenter IP** is still unverified (datacenter IPs are often blocked even when residential is not) — gating probe in `docs/DAILY_REFRESH_RAILWAY.md`. |
-| Model bundle absent on Railway containers | Open | `predict`/`drift` load a `.joblib` from `/app/data/processed/models/`; trained artifacts live on the user's host, not in repo/Postgres. Fix: Railway Volume + train-on-Railway (data is in Postgres) or commit an exported bundle. Ingest/features unaffected (per-step error capture). |
+| Model bundle absent on Railway containers | Resolved | Five LightGBM bundles committed under `models/` and baked into the scheduler image (`Dockerfile.scheduler` → `/app/data/processed/models/`); scheduler predicts all horizons in `KOSPI_PREDICT_HORIZONS` (default 1,3,5,10,20). Do NOT mount a Volume at `/app/data/processed` (it would shadow them). Refresh = retrain locally → copy to `models/` → commit → redeploy. |
 
 ---
 

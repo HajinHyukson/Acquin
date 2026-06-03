@@ -66,10 +66,11 @@ def run_entry(
     today = today or datetime.now(ZoneInfo(settings.timezone)).date()
     start = today - timedelta(days=lookback_days)
     logger.info("Running scheduled job '%s' for %s..%s", entry.job, start, today)
+    horizons = settings.predict_horizon_list if entry.predict else ()
     return run_daily_pipeline(
         start=start,
         end=today,
-        horizons=(5,) if entry.predict else (),
+        horizons=horizons,
         train=False,
         freshness_state=entry.freshness,
         database=database,

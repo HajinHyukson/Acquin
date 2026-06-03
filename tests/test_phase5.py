@@ -90,6 +90,26 @@ def test_run_entry_preliminary(env):
     assert not any(s.name.startswith("predict") for s in report.steps)
 
 
+def test_predict_horizon_list_parsing():
+    assert Settings(predict_horizons="1, 3 ,5").predict_horizon_list == (1, 3, 5)
+    assert Settings(predict_horizons="5").predict_horizon_list == (5,)
+    # Default keeps every horizon the frontend surfaces fresh.
+    assert Settings().predict_horizon_list == (1, 3, 5, 10, 20)
+
+
+def test_run_entry_predicts_configured_horizons(env):
+    db, settings = env
+    s = settings.model_copy(update={"predict_horizons": "1,5"})
+    entry = next(e for e in DEFAULT_SCHEDULE if e.job == "final_eod")
+    report = run_entry(
+        entry, database=db, settings=s, lookback_days=120, today=date(2022, 12, 30),
+    )
+    # The predicting entry runs one predict step per configured horizon (the
+    # steps exist even without a trained bundle — they just record an error).
+    predict_steps = {st.name for st in report.steps if st.name.startswith("predict")}
+    assert predict_steps == {"predict_1d", "predict_5d"}
+
+
 # --- registry + drift -----------------------------------------------------
 def test_train_registers_model_and_builds_baseline(env):
     db, settings = env

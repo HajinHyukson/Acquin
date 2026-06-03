@@ -30,7 +30,13 @@ ENV KOSPI_DATA_SOURCE=pykrx \
     KOSPI_TIMEZONE=Asia/Seoul \
     KOSPI_RAW_DATA_PATH=/app/data/raw \
     KOSPI_PROCESSED_DATA_PATH=/app/data/processed
-RUN mkdir -p /app/data/raw /app/data/processed
+RUN mkdir -p /app/data/raw /app/data/processed/models
+
+# Bake the trained model bundles in so the daily `predict`/`drift` steps work
+# (load_bundle reads /app/data/processed/models/<model>.joblib). NOTE: do NOT
+# mount a Railway Volume at /app/data/processed if you rely on these baked-in
+# models — a volume mount would shadow this directory and hide them.
+COPY models/ /app/data/processed/models/
 
 # Always-on KST scheduler: runs the §5 timetable (preliminary 15:50, first-EOD
 # 16:30, final-EOD + inference 18:30) and computes the trading date itself from

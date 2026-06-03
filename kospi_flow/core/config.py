@@ -80,6 +80,18 @@ class Settings(BaseSettings):
     drift_psi_warn: float = Field(default=0.1)
     drift_psi_alert: float = Field(default=0.25)
 
+    # --- Inference ---------------------------------------------------------
+    #: Comma-separated forward horizons the daily scheduler runs inference for.
+    #: One ``gbm_return_<h>d`` model bundle must exist per horizon. Defaults to
+    #: the full set surfaced by the frontend so every horizon stays fresh.
+    predict_horizons: str = Field(default="1,3,5,10,20")
+
+    @property
+    def predict_horizon_list(self) -> tuple[int, ...]:
+        return tuple(
+            int(h.strip()) for h in self.predict_horizons.split(",") if h.strip()
+        )
+
     # --- API (Phase 5 deployment hardening) --------------------------------
     #: Comma-separated allowed CORS origins; ``*`` allows all (dev default).
     cors_origins: str = Field(default="*")

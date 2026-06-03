@@ -76,34 +76,28 @@ In the Railway project that already hosts the API + Postgres:
 
 ---
 
-## STEP 2 — the model bundle (so the predict step works)
+## STEP 2 — the model bundle (predictions)
 
-`ingest` and `features` write to Postgres with no extra setup. The **predict**
-step needs a trained model bundle at `/app/data/processed/models/<model>.joblib`
-(`kospi_flow/ml/inference.py:load_bundle`). A fresh container has none, so until a
-bundle is present the daily pipeline's `predict`/`drift` steps log an error and
-skip — **ingest/features still succeed** (per-step error capture in
-`jobs/daily.py`), so the data refresh is unaffected.
+The **predict** step loads a trained bundle at
+`/app/data/processed/models/<model>.joblib` (`kospi_flow/ml/inference.py:load_bundle`).
 
-Because the full history now lives in Railway Postgres, the self-contained option
-is to **train on Railway** onto a persistent Volume:
+**Chosen approach: bundles are committed and baked into the image.** The five
+LightGBM bundles (`gbm_return_{1,3,5,10,20}d.joblib`, trained on this machine) live
+in the repo under `models/` and `Dockerfile.scheduler` copies them to
+`/app/data/processed/models/`. So predictions work on first deploy — no Volume,
+no train-on-Railway needed.
 
-1. Service → **Volumes** → attach a volume mounted at `/app/data/processed`
-   (so `/app/data/processed/models/*.joblib` survives restarts/redeploys).
-2. One-time bootstrap — temporarily set the Custom Start Command to train, deploy
-   once, then clear it:
-   ```
-   python -m kospi_flow.cli train --horizon 5
-   ```
-   (`lightgbm` is in this image, so it is auto-selected, matching the host models.)
-3. After the volume holds a bundle, the daily `predict` step works. Retrain
-   periodically (e.g. weekly) by re-running the bootstrap command, or run a
-   separate weekly Railway cron service with `daily --train`.
+The scheduler refreshes **all five horizons daily** (the set the frontend's Top
+Picks dropdown surfaces), controlled by `KOSPI_PREDICT_HORIZONS`
+(default `1,3,5,10,20`; one bundle must exist per listed horizon).
 
-Alternative (no volume): commit an exported active bundle from your host into the
-repo so it is baked into the image. Simpler to start, but couples deploys to a
-binary artifact and to whoever trained it. The Volume + train-on-Railway path is
-preferred now that the data lives in Postgres.
+> **Do not mount a Railway Volume at `/app/data/processed`** — it would shadow the
+> baked-in `models/` directory and hide the bundles.
+
+To **refresh the models** later: retrain on this machine
+(`python -m kospi_flow.cli train --horizon <h>` against the local DB), copy the
+new `.joblib`s into `models/`, commit, and redeploy. (The model itself only needs
+periodic retraining; daily `predict` just re-scores the latest features.)
 
 ---
 
