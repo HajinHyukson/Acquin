@@ -22,13 +22,27 @@ image deliberately omits. The live API service is unchanged.
 
 ---
 
+## Prerequisite — KRX login credentials (KRX_ID / KRX_PW)
+
+pykrx (>=1.2.x) **auto-logs into the KRX data portal** using the `KRX_ID` /
+`KRX_PW` environment variables (`pykrx/website/comm/auth.py`). These are **plain**
+env vars (not `KOSPI_`-prefixed). **Without them**, the investor-flow / foreign /
+market-cap / index / ticker-list endpoints all return empty — only Naver-backed
+OHLCV works — and pykrx prints `KRX 로그인 실패: KRX_ID 또는 KRX_PW ...`. Register a
+free account at <https://data.krx.co.kr> and set both vars wherever pykrx runs
+(locally for testing, and on the Railway service). pykrx re-logins automatically
+on session expiry, so a long-running scheduler is fine.
+
+> Confirm the creds first by running the probe **locally** with `KRX_ID`/`KRX_PW`
+> set; only once flows return locally is it worth testing Railway.
+
 ## STEP 0 (gating) — verify KRX is reachable from Railway's IP
 
-pykrx/KRX commonly blocks **datacenter** IPs even when a residential connection
-works. Railway containers run in a datacenter, so confirm reachability **before**
-relying on the scheduler. Investor-flow / foreign-holding endpoints are the ones
-that get blocked; plain price (OHLCV) is reachable almost everywhere, so the test
-must check `flow_rows`/`foreign_rows`, not `price_rows`.
+Even with valid credentials, KRX sometimes blocks **datacenter** IPs that work
+fine from a residential connection. Railway containers run in a datacenter, so
+confirm reachability **before** relying on the scheduler. Set `KRX_ID`/`KRX_PW` on
+the service first (STEP 1), then probe. The test must check `flow_rows`/
+`foreign_rows`, not `price_rows` (prices work even unauthenticated/blocked).
 
 1. Create the scheduler service (see STEP 1) but **temporarily** set its start
    command (Railway → service → Settings → Deploy → Custom Start Command) to a
@@ -66,7 +80,11 @@ In the Railway project that already hosts the API + Postgres:
    KOSPI_DATABASE_URL = ${{Postgres.DATABASE_URL}}   # internal URL (same project)
    KOSPI_DATA_SOURCE  = pykrx
    KOSPI_TIMEZONE     = Asia/Seoul
+   KRX_ID             = <your KRX data-portal id>     # plain name, NOT KOSPI_-prefixed
+   KRX_PW             = <your KRX data-portal password>
    ```
+   Railway encrypts variable values. `KRX_ID`/`KRX_PW` authorize the pykrx data
+   endpoints (see Prerequisite above).
    `${{Postgres.DATABASE_URL}}` is the **internal** reference — fast, private, and
    no public proxy needed because the scheduler runs inside the same Railway
    project as the database. (`core/db.normalize_db_url` rewrites the `postgres://`
