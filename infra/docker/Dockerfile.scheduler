@@ -1,0 +1,39 @@
+# Image for the always-on daily data-refresh scheduler (Railway service).
+#
+# Separate from the API image (infra/docker/Dockerfile) on purpose: this one
+# carries the real-data + ML extras (pykrx, lightgbm) that the read-only API
+# does not need, so the live API image stays slim and unaffected.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# libgomp1 is the OpenMP runtime LightGBM links against at import time; without
+# it `import lightgbm` fails with "libgomp.so.1: cannot open shared object file".
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY kospi_flow ./kospi_flow
+COPY apps ./apps
+COPY infra ./infra
+COPY scripts ./scripts
+
+# postgres -> write to Railway Postgres; pykrx -> real KRX ingestion;
+# lightgbm -> load/run the LightGBM model bundles (and prefer it when retraining).
+RUN pip install --no-cache-dir -e ".[postgres,pykrx,lightgbm]"
+
+# Defaults; override KOSPI_DATABASE_URL on the Railway service to the Postgres
+# plugin (internal URL). Mount a Railway Volume at /app/data/processed to keep
+# trained model bundles (/app/data/processed/models) across restarts/redeploys.
+ENV KOSPI_DATA_SOURCE=pykrx \
+    KOSPI_TIMEZONE=Asia/Seoul \
+    KOSPI_RAW_DATA_PATH=/app/data/raw \
+    KOSPI_PROCESSED_DATA_PATH=/app/data/processed
+RUN mkdir -p /app/data/raw /app/data/processed
+
+# Always-on KST scheduler: runs the §5 timetable (preliminary 15:50, first-EOD
+# 16:30, final-EOD + inference 18:30) and computes the trading date itself from
+# KOSPI_TIMEZONE, so it needs no per-day date arguments. No HTTP port -> no
+# healthcheck (configured in infra/railway/scheduler.json).
+CMD ["python", "-m", "kospi_flow.cli", "scheduler"]

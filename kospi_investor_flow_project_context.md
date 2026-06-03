@@ -3,9 +3,9 @@
 **Project name:** KOSPI Investor Flow Intelligence Platform  
 **Primary market:** KOSPI  
 **Document purpose:** Reusable context document for coding-agent sessions  
-**Last updated:** 2026-06-02  
-**Current phase:** MVP complete and **deploying**. Real KOSPI data loaded (948 tickers, ~5y) and models trained on the user's Korean-IP host. Code on GitHub. **Railway** backend (FastAPI) + Postgres are **online**; **Vercel** frontend wiring in progress. Remaining: finish/verify Vercel + prod data, API auth, ops maturity.  
-**Document version:** 0.5
+**Last updated:** 2026-06-03
+**Current phase:** MVP complete and **deployed**. Real KOSPI data loaded (948 tickers, ~5y), models trained, and production data served from Railway Postgres. Production split deployment is live: **Vercel** frontend at `https://acquin.vercel.app`, **Railway** FastAPI backend at `https://acquin-production.up.railway.app`, and Railway Postgres behind the API. Remaining: API auth/rate limiting, ops maturity, and licensed-data/legal hardening.
+**Document version:** 0.6
 
 ---
 
@@ -1535,6 +1535,98 @@ Next recommended task:
 
 ---
 
+### 2026-06-03 — Production split deploy verified (Railway + Vercel)
+
+Status:
+- Completed. The production frontend, backend API, and Postgres-backed data path are live and verified.
+
+Current deployment structure:
+- **Frontend:** Vercel, production domain `https://acquin.vercel.app`.
+- **Backend API:** Railway FastAPI service, production domain `https://acquin-production.up.railway.app`.
+- **Database:** Railway Postgres attached to the API service via `KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}`.
+- **Data/ML source of truth:** real KOSPI data and model artifacts were produced from the user's Korean-IP host; production API reads the populated Railway Postgres. Ongoing pykrx ingestion should still run from a Korean-IP host and write to Railway Postgres.
+
+Working production env wiring:
+- Vercel frontend env: `NEXT_PUBLIC_API_BASE=https://acquin-production.up.railway.app` (no trailing slash).
+- Railway API service env: `KOSPI_CORS_ORIGINS=https://acquin.vercel.app`, `KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}`, `KOSPI_DATA_SOURCE=sample`, `KOSPI_DB_ECHO=false`.
+- Railway API service build/deploy: Dockerfile builder, `infra/docker/Dockerfile`, repo root as root directory, no custom start command needed; Dockerfile CMD runs `python -m kospi_flow.cli serve --host 0.0.0.0`.
+
+Verification:
+- `https://acquin-production.up.railway.app/health` returns 200 with `{"status":"ok"}`.
+- `https://acquin-production.up.railway.app/docs` returns FastAPI Swagger UI.
+- `https://acquin-production.up.railway.app/market/overview` returns real prod data (`n_stocks=948`, latest data date observed `2026-06-01`) and sends `Access-Control-Allow-Origin: https://acquin.vercel.app`.
+- `https://acquin.vercel.app` successfully calls the Railway API after updating `NEXT_PUBLIC_API_BASE`.
+
+Deployment debugging note:
+- Do **not** use `https://web-production-c9e69.up.railway.app` for the frontend API base. It returned Railway fallback 404s (`X-Railway-Fallback`) for `/health`, `/docs`, and `/market/overview`; the correct backend API domain is `https://acquin-production.up.railway.app`.
+- Vercel Output Directory must be blank/default for the Next.js app. A prior `public` Output Directory setting caused post-build failure after `Collecting build traces`.
+
+Known issues / blockers:
+- API is still unauthenticated and public. Anyone with the API URL can read/modify watchlists. Next priority: add API-key auth + rate limiting before wider sharing.
+- Production Postgres is populated now, but ongoing data refresh/retrain needs an operational schedule on the Korean-IP host (or a future licensed/KR-hosted ingestion service).
+
+Next recommended task:
+- Add API auth + rate limiting, then continue production maturity: scheduled KR-host ingestion, MLflow/model lifecycle, real alert channels, and legal/data-license sign-off.
+
+---
+
+### 2026-06-03 — Daily auto-refresh design: Railway scheduler service (Option A)
+
+Status:
+- In progress. Deploy plumbing for an always-on daily refresh into Railway
+  Postgres is committed; activation is gated on a reachability test the user runs
+  on Railway, and on getting a model bundle onto Railway for the predict step.
+
+Goal (user request):
+- Update the production DB daily **without** populating/storing the DB on a local
+  computer and using its disk space.
+
+Key correction to prior assumptions:
+- The user reports pykrx now reaches the KRX investor-flow/foreign endpoints from
+  **their own machine without a VPN** (contradicts the 2026-06-01 "US IP blocked"
+  entries; KRX behavior/their network changed). They want the daily job always-on
+  and are not constrained to a Korean address.
+
+Design chosen (Option A):
+- Run the existing always-on scheduler (`python -m kospi_flow.cli scheduler`,
+  `jobs/scheduler.py`) as a **second Railway service** beside the API. It runs the
+  §5 KST timetable and computes the trading date itself from `KOSPI_TIMEZONE`
+  (`Asia/Seoul`), so no per-day date args. It writes ingest/features/predictions
+  **straight into Railway Postgres** via the internal `${{Postgres.DATABASE_URL}}`
+  — no local DB, no `copy-db`. Raw Parquet snapshots are tiny and self-overwriting.
+
+Completed deliverables (this session):
+- `infra/docker/Dockerfile.scheduler` — dedicated scheduler image (keeps the live
+  API image slim/untouched): installs `.[postgres,pykrx,lightgbm]`, adds
+  `libgomp1` (LightGBM OpenMP runtime), defaults `KOSPI_DATA_SOURCE=pykrx` +
+  `KOSPI_TIMEZONE=Asia/Seoul`, CMD = `cli scheduler`.
+- `infra/railway/scheduler.json` — Railway config-as-code for the scheduler
+  service (Dockerfile builder, no healthcheck, restart ON_FAILURE).
+- `docs/DAILY_REFRESH_RAILWAY.md` — runbook: the gating KRX-reachability probe,
+  service creation + env, and the model-bundle options.
+
+Open items / blockers:
+- **Gating test (user, on Railway):** datacenter IPs are commonly KRX-blocked even
+  when a residential IP is not. Must confirm a one-ticker `ingest` from Railway
+  returns `flow_rows>0`/`foreign_rows>0` (not just `price_rows`). If blocked, fall
+  back to Option B (same scheduler on the user's KRX-reachable machine → Railway
+  **public** Postgres URL).
+- **Model bundle on Railway:** `predict`/`drift` need a `.joblib` at
+  `/app/data/processed/models/`; a fresh container has none (artifacts were trained
+  on the user's host, not in repo/Postgres). Data refresh (ingest/features) is
+  unaffected — those steps error-and-skip per `jobs/daily.py`. Recommended fix:
+  Railway Volume at `/app/data/processed` + train-on-Railway (history is now in
+  Postgres), or commit an exported bundle.
+
+No code (`*.py`) changed → test suite unaffected (still ~105).
+
+Next recommended task:
+- User runs the STEP 0 reachability probe on Railway. If flows return, finish
+  Option A (clear the probe start command; attach the model Volume + bootstrap
+  `train`). If blocked, switch to Option B. Then API auth + rate limiting.
+
+---
+
 ## 17. Decision log
 
 | Date | Decision | Rationale |
@@ -1563,7 +1655,8 @@ Next recommended task:
 | 2026-06-02 | Split deploy: **frontend → Vercel, backend+Postgres → Railway**, ingestion stays on the KR host. | Vercel can't run the pandas/ML backend or hold the ~2 GB DB; Railway runs the Docker image with managed Postgres. User chose Railway over the Render blueprint (`render.yaml` kept as an alternative). |
 | 2026-06-02 | `serve` reads `PORT` from env and tolerates a literal un-expanded `$PORT`; start command omits `--port`. | Railway ran the start command without shell expansion, passing `$PORT` literally and crashing argparse. `resolve_port()` makes it robust regardless of builder/start-command source. |
 | 2026-06-02 | Adopt platform `DATABASE_URL` + rewrite `postgres://`→`postgresql+psycopg://`. | Railway/Render hand out un-prefixed `postgres://` DSNs; this makes them work without manual edits and with psycopg3. |
-
+| 2026-06-03 | Production API base is `https://acquin-production.up.railway.app`; Vercel production frontend is `https://acquin.vercel.app`. | The earlier `web-production-c9e69.up.railway.app` Railway domain returned fallback 404s and was not the working API service route. Vercel must use the verified Railway API domain in `NEXT_PUBLIC_API_BASE`; Railway CORS must allow the Vercel production origin. |
+| 2026-06-03 | Daily refresh = a **second Railway service** running `cli scheduler`, writing to Postgres via the internal `${{Postgres.DATABASE_URL}}`; its own image (`Dockerfile.scheduler`) with pykrx/lightgbm so the slim API image is untouched. | Satisfies "update Postgres daily without a local DB/space": the scheduler writes straight to Postgres and computes the KST date itself (no per-day args, no `copy-db`). Gated on confirming KRX is reachable from Railway's datacenter IP. |
 ---
 
 ## 18. Known issues and technical debt
@@ -1581,14 +1674,16 @@ Next recommended task:
 | Sample provider data is synthetic | Open (by design) | Must never be shown to users as real data; use `pykrx`/`licensed` for real data. |
 | Sample trading calendar ignores KR market holidays | Open | Uses Mon–Fri business days; real providers carry the true calendar. |
 | Monetary columns use Float not Numeric | Open | Acceptable for MVP; revisit for exact-precision KRW in production Postgres. |
-| ML metrics computed on synthetic data | Resolved on KR host | Real data backfilled + models retrained on the user's Korean-IP host (2026-06-02). Railway prod Postgres still needs the data loaded via `copy-db`. |
+| ML metrics computed on synthetic data | Resolved in prod | Real data backfilled + models retrained on the user's Korean-IP host; Railway production API now serves populated real-data Postgres. |
 | KOSPI benchmark is a cap-weighted proxy | Resolved (path); data blocked | Index data path built (`fact_index_daily` + benchmark prefers real index, falls back to proxy). Real index numbers still blocked from this env — needs Korean-IP host or licensed feed. |
 | Real KRX index endpoint blocked from this env | Open | pykrx `get_index_ohlcv`/`get_index_ticker_list` IP-blocked here (2026-05-31), like cap/flows. Sample index works offline. |
-| Frontend not build-verified | Resolved | `apps/web` is a full Next.js + ECharts app, `next build` clean (10 routes); deploying to Vercel. |
+| Frontend not build-verified | Resolved | `apps/web` is a full Next.js + ECharts app, `next build` clean (10 routes), deployed on Vercel at `https://acquin.vercel.app`. |
 | Phase 5 hardening incomplete | Mostly resolved | Scheduling, registry, drift, alerting, watchlists, security + licensing review docs now done. Remaining: licensed feed, Airflow/Prefect, API auth, MLflow. |
-| API has no authentication/rate limiting | Open — **live-deploy blocker** | Railway/Vercel URLs are becoming public; anyone with the URL can read/modify watchlists. Add API-key auth + rate limiting next (see docs/SECURITY.md). |
-| Railway prod Postgres may be empty | Open (deploy) | Provisioned but not auto-populated; run `copy-db --dest <DATABASE_PUBLIC_URL>` from the KR host, and ensure the web service has `KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}`. |
+| API has no authentication/rate limiting | Open — **live-deploy blocker** | Railway/Vercel URLs are public; anyone with the URL can read/modify watchlists. Add API-key auth + rate limiting next (see docs/SECURITY.md). |
+| Railway prod Postgres may be empty | Resolved | Production API returns real populated data (`n_stocks=948`, latest observed data date `2026-06-01`) through Railway Postgres. Ongoing refresh still needs a KR-host schedule or licensed ingestion path. |
 | Preferred-share exclusion only | Open | Screener excludes preferred shares; ETF/SPAC/REIT exclusion still needs an instrument-type field/source. |
+| KRX reachable from user's machine (no VPN) | Updated 2026-06-03 | User reports pykrx now reaches flow/foreign endpoints from their machine without a VPN, contradicting the 2026-06-01 "US IP blocked" finding. Reachability from **Railway's datacenter IP** is still unverified (datacenter IPs are often blocked even when residential is not) — gating probe in `docs/DAILY_REFRESH_RAILWAY.md`. |
+| Model bundle absent on Railway containers | Open | `predict`/`drift` load a `.joblib` from `/app/data/processed/models/`; trained artifacts live on the user's host, not in repo/Postgres. Fix: Railway Volume + train-on-Railway (data is in Postgres) or commit an exported bundle. Ingest/features unaffected (per-step error capture). |
 
 ---
 
@@ -1655,7 +1750,7 @@ Use this brief to start the next coding-agent session.
 You are working on the KOSPI Investor Flow Intelligence Platform.
 
 Read this context doc first (esp. the 2026-06-02 progress entries). The Phases
-0–5 MVP is CODE-COMPLETE and the app is BEING DEPLOYED. ~105 tests
+0–5 MVP is CODE-COMPLETE and the app is DEPLOYED. ~105 tests
 (`python -m pytest`; last full run green at 101, +4 serve-port tests).
 
 WHAT EXISTS
@@ -1673,13 +1768,14 @@ WHAT EXISTS
   watchlist); rankings/screener/watchlists/models/data-status; nav freshness badge.
 - Benchmark prefers the real KOSPI index (fact_index_daily), falls back to proxy.
 
-DEPLOYMENT STATE (in progress — see 2026-06-02 entry)
+DEPLOYMENT STATE (live — see 2026-06-03 entry)
 - Repo: github.com/HajinHyukson/Acquin (origin, HTTPS, branch main). Git is
   initialized here; `git push` works (creds cached; identity FaustCalc
   <hajinson1346@gmail.com>). Commit + push as you change deploy files.
-- Backend → Railway (Docker via railway.json + infra/docker/Dockerfile),
-  Postgres provisioned, /health green. Frontend → Vercel (Root Directory
-  apps/web, env NEXT_PUBLIC_API_BASE = Railway URL), being wired by the user.
+- Backend → Railway FastAPI at `https://acquin-production.up.railway.app`
+  (Docker via railway.json + infra/docker/Dockerfile), backed by Railway
+  Postgres. Frontend → Vercel at `https://acquin.vercel.app` (Root Directory
+  apps/web, env `NEXT_PUBLIC_API_BASE=https://acquin-production.up.railway.app`).
 - Deploy plumbing done: requirements.txt (Nixpacks), .railwayignore, render.yaml
   (alt), copy-db tool, cli.resolve_port() ($PORT tolerance), DATABASE_URL adoption
   + postgres:// normalization. Full runbook: docs/DEPLOYMENT.md.
@@ -1687,21 +1783,18 @@ DEPLOYMENT STATE (in progress — see 2026-06-02 entry)
 REAL DATA: lives on the user's Korean-IP host (pykrx; 948 tickers, ~5y, models
 trained — LightGBM). This agent environment can only reach stock OHLCV (cap/
 flow/foreign/index are KRX-IP-blocked), so YOU cannot ingest — the user runs it.
-The Railway Postgres must be loaded via `copy-db` from the KR host.
+Railway Postgres is populated in production; future refresh/retrain still runs
+from the KR host (or a future licensed/KR-hosted ingestion service).
 
 DO NEXT (in order)
-1. Finish/verify the live deploy with the user: Railway web has
-   KOSPI_DATABASE_URL=${{Postgres.DATABASE_URL}}; data loaded into Railway
-   Postgres (copy-db) or ingested to it; Vercel NEXT_PUBLIC_API_BASE set; Railway
-   KOSPI_CORS_ORIGINS = the Vercel domain. Help debug deploy logs as needed.
-2. **API auth + rate limiting** (BLOCKER for public exposure) — the URLs are
+1. **API auth + rate limiting** (BLOCKER for public exposure) — the URLs are
    public and the API is unauthenticated (anyone can read/modify watchlists).
    Add an API-key dependency (KOSPI_API_KEY setting) + simple rate limiting; have
    the frontend send the key. This is the immediate §20-step-4 priority.
-3. Rest of production maturity (§20 step 4): Airflow/Prefect scheduling, MLflow
+2. Rest of production maturity (§20 step 4): Airflow/Prefect scheduling, MLflow
    registry + retrain-on-drift, real alert channels (email/Kakao/Telegram),
    LicensedProvider for a licensed feed, legal/data-license sign-off.
-4. Optional polish: sector filter / sortable tables on picks & rankings; a
+3. Optional polish: sector filter / sortable tables on picks & rankings; a
    compare view.
 
 CANNOT do from this env: real pykrx ingest (KR-IP only), and running the live
@@ -1792,4 +1885,3 @@ These should be resolved as implementation progresses.
 | Walk-forward validation | Time-based model validation that simulates future prediction. |
 | IC | Information coefficient; rank correlation between model predictions and realized returns. |
 | ICIR | Information coefficient information ratio; stability of IC over time. |
-
