@@ -1605,12 +1605,23 @@ Completed deliverables (this session):
 - `docs/DAILY_REFRESH_RAILWAY.md` — runbook: the gating KRX-reachability probe,
   service creation + env, and the model-bundle options.
 
-Open items / blockers:
-- **Gating test (user, on Railway):** datacenter IPs are commonly KRX-blocked even
-  when a residential IP is not. Must confirm a one-ticker `ingest` from Railway
-  returns `flow_rows>0`/`foreign_rows>0` (not just `price_rows`). If blocked, fall
-  back to Option B (same scheduler on the user's KRX-reachable machine → Railway
-  **public** Postgres URL).
+Gating test — RESOLVED 2026-06-03 (Option A verified on Railway):
+- Root cause of empty flows was NOT the IP: pykrx 1.2.8 now **requires a KRX
+  data-portal login** (`KRX_ID`/`KRX_PW` env vars → `website/comm/auth.py`
+  auto-login). Without them, only OHLCV returns; flow/foreign/cap/index/ticker
+  endpoints are empty (this machine failed identically — KRX enforced login some
+  time after the Jun 1–2 backfill).
+- With `KRX_ID`/`KRX_PW` set on the Railway scheduler service (and
+  `KOSPI_DATA_SOURCE=pykrx` set service-level to override the project's `sample`),
+  the Railway probe returned real data: `stocks=948 price_rows=4 flow_rows=12
+  foreign_rows=4`, `KRX 로그인 완료`. So **Railway's IP is not blocked** and Option A
+  is the live path (no Option B fallback needed). pykrx auto-re-logins on the
+  1-hour token expiry, so the always-on scheduler self-reauthenticates.
+- Activation: clear the probe Custom Start Command so the image CMD
+  (`cli scheduler`) runs. Required service vars: `KOSPI_DATABASE_URL`,
+  `KOSPI_DATA_SOURCE=pykrx`, `KRX_ID`, `KRX_PW` (+ `KOSPI_TIMEZONE` default).
+- Index endpoint not yet confirmed under login (probe used `--no-index`); if it
+  stays empty the benchmark falls back to the cap-weighted proxy (non-blocking).
 Model bundle on Railway (RESOLVED — predictions wired):
 - Decision: **commit the trained bundles and bake them into the scheduler image**
   (user chose to train on this machine + commit, not skip). The five LightGBM
@@ -1695,7 +1706,7 @@ Next recommended task:
 | API has no authentication/rate limiting | Open — **live-deploy blocker** | Railway/Vercel URLs are public; anyone with the URL can read/modify watchlists. Add API-key auth + rate limiting next (see docs/SECURITY.md). |
 | Railway prod Postgres may be empty | Resolved | Production API returns real populated data (`n_stocks=948`, latest observed data date `2026-06-01`) through Railway Postgres. Ongoing refresh still needs a KR-host schedule or licensed ingestion path. |
 | Preferred-share exclusion only | Open | Screener excludes preferred shares; ETF/SPAC/REIT exclusion still needs an instrument-type field/source. |
-| KRX reachable from user's machine (no VPN) | Updated 2026-06-03 | User reports pykrx now reaches flow/foreign endpoints from their machine without a VPN, contradicting the 2026-06-01 "US IP blocked" finding. Reachability from **Railway's datacenter IP** is still unverified (datacenter IPs are often blocked even when residential is not) — gating probe in `docs/DAILY_REFRESH_RAILWAY.md`. |
+| KRX requires login (KRX_ID/KRX_PW) | Resolved 2026-06-03 | pykrx 1.2.8 auto-logs into the KRX data portal via `KRX_ID`/`KRX_PW`; without them flow/foreign/cap/index/ticker endpoints return empty (only OHLCV). Confirmed on this machine AND Railway. With creds set, the Railway probe returned real data (stocks=948, real flows/foreign), so Railway's IP is NOT blocked — Option A is live. The earlier "US IP blocked" note (2026-06-01) is superseded: it was the missing login, surfaced once KRX enforced it. |
 | Model bundle absent on Railway containers | Resolved | Five LightGBM bundles committed under `models/` and baked into the scheduler image (`Dockerfile.scheduler` → `/app/data/processed/models/`); scheduler predicts all horizons in `KOSPI_PREDICT_HORIZONS` (default 1,3,5,10,20). Do NOT mount a Volume at `/app/data/processed` (it would shadow them). Refresh = retrain locally → copy to `models/` → commit → redeploy. |
 
 ---
