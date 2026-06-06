@@ -135,14 +135,36 @@ def run_daily_pipeline(
             lambda mn=model_name: f"stored={predict_and_store(database, mn, tickers=tickers, settings=settings)}",
         )
 
-        # Model-drift monitoring (best-effort; skipped if no bundle exists yet).
+        # Model-drift monitoring + retrain decision (best-effort; skipped if no
+        # bundle exists yet). When a retrain is warranted (drift alert or age
+        # cap) the step either retrains-then-predicts (if KOSPI_RETRAIN_ON_DRIFT)
+        # or just records "retrain_recommended" — the RETRAIN_RECOMMENDED alert
+        # then reaches the notifier in the alerts step (§24.2 / §25 Phase C).
         from kospi_flow.ml.drift import compute_drift
+        from kospi_flow.ml.lifecycle import days_since, decide_retrain
 
-        def _drift(mn=model_name):
+        def _drift_and_maybe_retrain(mn=model_name, h=h):
             bundle = load_bundle(mn, settings)
-            return compute_drift(database, bundle, settings=settings)["status"]
+            status = compute_drift(database, bundle, settings=settings)["status"]
+            decision = decide_retrain(
+                drift_status=status,
+                age_days=days_since(bundle.get("trained_at"), end),
+                max_model_age_days=settings.max_model_age_days,
+            )
+            if not decision.should_retrain:
+                return f"status={status}"
+            why = "; ".join(decision.reasons)
+            if settings.retrain_on_drift:
+                from kospi_flow.ml.train import train_and_evaluate
 
-        _run_step(report, f"drift_{h}d", lambda mn=model_name: f"status={_drift(mn)}")
+                train_and_evaluate(
+                    database, horizon=h, tickers=tickers, settings=settings
+                )
+                predict_and_store(database, mn, tickers=tickers, settings=settings)
+                return f"status={status} retrained ({why})"
+            return f"status={status} retrain_recommended ({why})"
+
+        _run_step(report, f"drift_{h}d", _drift_and_maybe_retrain)
 
     validator = DataValidator(database)
     rep = _run_step(report, "validate", lambda: validator.validate(tickers))

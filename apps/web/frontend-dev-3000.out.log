@@ -1,0 +1,24 @@
+
+> kospi-flow-web@0.2.0 dev
+> next dev -p 3000
+
+  ▲ Next.js 14.2.35
+  - Local:        http://localhost:3000
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 1703ms
+ ○ Compiling / ...
+ ✓ Compiled / in 4.2s (1591 modules)
+ GET / 200 in 4386ms
+ GET / 200 in 38ms
+ GET / 200 in 64ms
+ GET / 200 in 6869ms
+ ○ Compiling /stocks/[ticker] ...
+ ✓ Compiled /stocks/[ticker] in 629ms (1602 modules)
+ GET /stocks/000660 200 in 1871ms
+ GET /stocks/000660 200 in 149ms
+ GET /stocks/000660 200 in 2634ms
+ GET /stocks/000660 200 in 295ms
+ GET /stocks/000660 200 in 3786ms
+ GET / 200 in 134ms

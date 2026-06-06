@@ -25,12 +25,22 @@ def walk_forward_splits(
     n_splits: int = 3,
     embargo: int = 0,
     min_train: int = 30,
+    train_window: int | None = None,
 ) -> list[Fold]:
-    """Expanding-window folds over the sorted unique dates.
+    """Walk-forward folds over the sorted unique dates.
 
     ``embargo`` trading dates are dropped between each train block and its test
     block to avoid target leakage (set it to the prediction horizon).
+
+    ``train_window`` caps each fold's train block to its last N dates (rolling
+    window); ``None`` keeps the expanding window (all history up to the cut). Set
+    it to ``Settings.train_window_days`` so the OOS evaluation reflects how the
+    deployed bundle is actually fit (context doc §24.1 / §25 Phase B).
     """
+
+    def _train_start(train_end: int) -> int:
+        return 0 if not train_window else max(0, train_end - train_window)
+
     unique = sorted(pd.Series(dates).dropna().unique())
     n = len(unique)
     if n < min_train + n_splits + embargo + 1:
@@ -38,7 +48,7 @@ def walk_forward_splits(
         cut = max(min_train, int(n * 0.7))
         if cut + embargo >= n:
             return []
-        return [Fold(unique[:cut], unique[cut + embargo :])]
+        return [Fold(unique[_train_start(cut) : cut], unique[cut + embargo :])]
 
     test_size = max(1, (n - min_train) // (n_splits + 1))
     folds: list[Fold] = []
@@ -50,7 +60,7 @@ def walk_forward_splits(
             break
         folds.append(
             Fold(
-                train_dates=unique[:train_end],
+                train_dates=unique[_train_start(train_end) : train_end],
                 test_dates=unique[test_start : min(test_end, n)],
             )
         )

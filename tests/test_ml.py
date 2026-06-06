@@ -127,3 +127,55 @@ def test_top_picks_endpoint(ml_env):
     assert rets == sorted(rets, reverse=True)
     assert rows[0]["rank"] == 1
     assert "foreign_net" in rows[0] and "predicted_price" in rows[0]
+
+
+# --- Phase B: rolling-window training -------------------------------------
+def test_walk_forward_rolling_window_caps_train_block():
+    dates = pd.Series(pd.bdate_range("2021-01-04", periods=400).date)
+    rolling = walk_forward_splits(
+        dates, n_splits=3, embargo=5, min_train=60, train_window=50
+    )
+    assert rolling
+    for f in rolling:
+        assert len(f.train_dates) <= 50  # rolling cap respected
+        assert max(f.train_dates) < min(f.test_dates)  # still leak-free
+    # Expanding (default) trains on more than the cap in later folds.
+    expanding = walk_forward_splits(dates, n_splits=3, embargo=5, min_train=60)
+    assert max(len(f.train_dates) for f in expanding) > 50
+
+
+def test_trailing_window_keeps_last_n_dates(ml_env):
+    from kospi_flow.ml.train import _trailing_window
+
+    db, _ = ml_env
+    with db.session() as s:
+        panel, _cols = build_dataset(s, horizon=5, tickers=TICKERS)
+    n_dates = panel["date"].nunique()
+
+    assert _trailing_window(panel, None) is panel  # None -> unchanged (identity)
+    win = _trailing_window(panel, 20)
+    assert win["date"].nunique() == 20
+    assert set(win["date"]) == set(sorted(panel["date"].unique())[-20:])
+    assert _trailing_window(panel, n_dates + 5).equals(panel)  # window >= history
+
+
+def test_train_window_restricts_bundle_fit_span(ml_env):
+    from kospi_flow.ml.inference import load_bundle
+
+    db, base = ml_env
+    settings = base.model_copy(update={"train_window_days": 60})
+    report = train_and_evaluate(
+        db, horizon=5, tickers=TICKERS, n_splits=3,
+        model_version="vwin60", settings=settings,
+    )
+    assert report.train_window_days == 60
+
+    bundle = load_bundle("gbm_return_5d", settings)
+    assert bundle["train_window_days"] == 60
+    assert bundle["fit_date_start"] and bundle["fit_date_end"]
+
+    with db.session() as s:
+        panel, _ = build_dataset(s, horizon=5, tickers=TICKERS)
+    # The windowed fit starts later than full history but ends at the latest date.
+    assert pd.Timestamp(bundle["fit_date_start"]) > pd.Timestamp(min(panel["date"]))
+    assert pd.Timestamp(bundle["fit_date_end"]) == pd.Timestamp(max(panel["date"]))

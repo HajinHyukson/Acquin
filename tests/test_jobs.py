@@ -64,6 +64,45 @@ def test_daily_pipeline_runs_with_training(env):
     assert by_name["predict_5d"].status == "ok"
 
 
+def test_retrain_all_syncs_bundles_and_metrics(tmp_path):
+    from kospi_flow.core.enums import FreshnessState
+    from kospi_flow.data.ingestion import Ingestor
+    from kospi_flow.data.providers import get_provider
+    from kospi_flow.jobs.retrain import retrain_all
+
+    tickers = ["005930", "000660", "005380"]
+    settings = Settings(
+        database_url=f"sqlite:///{(tmp_path / 'r.db').as_posix()}",
+        raw_data_path=tmp_path / "raw",
+        processed_data_path=tmp_path / "processed",
+    )
+    db = Database(settings.database_url)
+    db.create_all()
+    Ingestor(
+        get_provider("sample"), db, settings=settings,
+        freshness_state=FreshnessState.FINAL_EOD,
+    ).run(date(2021, 1, 4), date(2022, 12, 30), tickers=tickers)
+
+    repo_models = tmp_path / "repo_models"  # stand-in for the committed models/ dir
+    result = retrain_all(
+        horizons=[5, 20], tickers=tickers, model_version="v2026-06-09",
+        repo_models_dir=repo_models, database=db, settings=settings,
+    )
+
+    assert result.model_version == "v2026-06-09"
+    assert {r.horizon for r in result.reports} == {5, 20}
+    # Each horizon's bundle copied into the (tmp) committed models dir.
+    assert (repo_models / "gbm_return_5d.joblib").exists()
+    assert (repo_models / "gbm_return_20d.joblib").exists()
+    assert set(result.synced) == {"gbm_return_5d.joblib", "gbm_return_20d.joblib"}
+    # Durable metrics history: one row per horizon for this run.
+    csv_path = repo_models / "metrics_history.csv"
+    lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0].startswith("date,model_name,model_version,horizon,")
+    assert len(lines) - 1 == 2
+    assert all("v2026-06-09" in line for line in lines[1:])
+
+
 def test_data_status_endpoint(env):
     db, settings = env
     # Ensure there is data (pipeline above ran in module scope before this).

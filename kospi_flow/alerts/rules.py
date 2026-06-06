@@ -69,6 +69,34 @@ def _drift_alerts(session: Session) -> list[Alert]:
     return alerts
 
 
+def _retrain_alerts(session: Session) -> list[Alert]:
+    """Recommend a retrain when the latest drift status is ``alert``.
+
+    Complements ``_drift_alerts`` (which reports the drift): this one is the
+    *actionable* signal a human/CI acts on when ``retrain_on_drift`` is off
+    (the prod default — bundles are baked into the image). See context doc §24.2.
+    """
+    latest_date = session.scalar(select(func.max(FactModelDriftDaily.date)))
+    if latest_date is None:
+        return []
+    rows = session.execute(
+        select(FactModelDriftDaily).where(FactModelDriftDaily.date == latest_date)
+    ).scalars().all()
+    return [
+        Alert(
+            code="RETRAIN_RECOMMENDED",
+            severity="warning",
+            message=(
+                f"Retrain recommended for '{r.model_name}' "
+                f"(drift alert, max PSI={r.max_psi:.3f})"
+            ),
+            context={"model_name": r.model_name, "max_psi": r.max_psi},
+        )
+        for r in rows
+        if r.status == "alert"
+    ]
+
+
 def _watchlist_flow_alerts(
     session: Session, threshold: float
 ) -> list[Alert]:
@@ -128,5 +156,6 @@ def evaluate_alerts(
     alerts = list(_validation_alerts(validation_report))
     with database.session() as s:
         alerts.extend(_drift_alerts(s))
+        alerts.extend(_retrain_alerts(s))
         alerts.extend(_watchlist_flow_alerts(s, watchlist_flow_threshold))
     return alerts

@@ -92,6 +92,23 @@ class Settings(BaseSettings):
             int(h.strip()) for h in self.predict_horizons.split(",") if h.strip()
         )
 
+    # --- ML training -------------------------------------------------------
+    #: Fit the final inference bundle (and the walk-forward eval folds) on only
+    #: the last N trading dates. ``None`` = all history (default, unchanged
+    #: behaviour). ~756 ≈ 3 trading years; a trailing window keeps the model on
+    #: the current regime and lets stale flow→return relationships age out.
+    train_window_days: int | None = Field(default=None)
+
+    # --- Retrain trigger (§24.2 / §25 Phase C) -----------------------------
+    #: If true, the daily pipeline retrains a model when a retrain is warranted
+    #: (drift alert or age cap). If false (prod default — bundles are baked into
+    #: the Railway image and the container FS is ephemeral), it only emits a
+    #: ``RETRAIN_RECOMMENDED`` alert and a human retrains in CI/local.
+    retrain_on_drift: bool = Field(default=False)
+    #: Recommend/trigger a retrain when the active bundle is older than this many
+    #: days. ``None`` = age never triggers (drift alert is then the only trigger).
+    max_model_age_days: int | None = Field(default=None)
+
     # --- API (Phase 5 deployment hardening) --------------------------------
     #: Comma-separated allowed CORS origins; ``*`` allows all (dev default).
     cors_origins: str = Field(default="*")

@@ -115,11 +115,58 @@ def cmd_train(args) -> int:
         tickers=tickers,
         n_splits=args.splits,
         model_name=args.model_name,
+        model_version=args.model_version,
         settings=settings,
     )
     import json
 
     print(json.dumps(report.as_dict(), indent=2, default=str))
+    return 0
+
+
+def cmd_retrain(args) -> int:
+    from kospi_flow.jobs.retrain import retrain_all
+
+    settings = _settings_with_overrides(args)
+    db = get_database(settings)
+    horizons = (
+        [int(h) for h in args.horizons.split(",") if h.strip()]
+        if args.horizons
+        else list(settings.predict_horizon_list)
+    )
+    tickers = args.tickers.split(",") if args.tickers else None
+    result = retrain_all(
+        horizons,
+        tickers=tickers,
+        model_version=args.model_version,
+        n_splits=args.splits,
+        sync=not args.no_sync,
+        database=db,
+        settings=settings,
+    )
+
+    import json
+
+    print(
+        json.dumps(
+            {
+                "model_version": result.model_version,
+                "horizons": [r.horizon for r in result.reports],
+                "mean_ic": {r.horizon: r.mean_ic for r in result.reports},
+                "synced": result.synced,
+                "models_dir": result.models_dir,
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    if not args.no_sync:
+        print(
+            "\nNext: review models/, then commit + push so Railway redeploys:\n"
+            f"  git add models/\n"
+            f"  git commit -m \"Retrain models {result.model_version}\"\n"
+            f"  git push"
+        )
     return 0
 
 
@@ -330,7 +377,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--splits", type=int, default=3, help="Walk-forward folds")
     p_train.add_argument("--tickers", help="Comma-separated tickers (default: all)")
     p_train.add_argument("--model-name", help="Override model name")
+    p_train.add_argument(
+        "--model-version",
+        help="Version label (default: date stamp vYYYYMMDD; a distinct value "
+        "per retrain keeps the registry + metrics history instead of overwriting)",
+    )
     p_train.set_defaults(func=cmd_train)
+
+    p_retrain = sub.add_parser(
+        "retrain",
+        help="Train all horizons + stage bundles under models/ for commit (KR host)",
+    )
+    p_retrain.add_argument(
+        "--horizons", help="Comma-separated (default: KOSPI_PREDICT_HORIZONS)"
+    )
+    p_retrain.add_argument("--tickers", help="Comma-separated tickers (default: all)")
+    p_retrain.add_argument(
+        "--model-version", help="Version label (default: date stamp vYYYYMMDD)"
+    )
+    p_retrain.add_argument("--splits", type=int, default=3, help="Walk-forward folds")
+    p_retrain.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Train only; do not copy bundles into models/",
+    )
+    p_retrain.set_defaults(func=cmd_retrain)
 
     p_pred = sub.add_parser("predict", help="Generate + store ML predictions")
     p_pred.add_argument("--horizon", type=int, default=5, help="Model horizon (days)")

@@ -3,9 +3,9 @@
 **Project name:** KOSPI Investor Flow Intelligence Platform  
 **Primary market:** KOSPI  
 **Document purpose:** Reusable context document for coding-agent sessions  
-**Last updated:** 2026-06-03
-**Current phase:** MVP complete and **deployed**. Real KOSPI data loaded (948 tickers, ~5y), models trained, and production data served from Railway Postgres. Production split deployment is live: **Vercel** frontend at `https://acquin.vercel.app`, **Railway** FastAPI backend at `https://acquin-production.up.railway.app`, and Railway Postgres behind the API. Remaining: API auth/rate limiting, ops maturity, and licensed-data/legal hardening.
-**Document version:** 0.6
+**Last updated:** 2026-06-06
+**Current phase:** MVP complete and **deployed**. Real KOSPI data loaded (948 tickers, ~5y), models trained, and production data served from Railway Postgres. Production split deployment is live: **Vercel** frontend at `https://acquin.vercel.app`, **Railway** FastAPI backend at `https://acquin-production.up.railway.app`, and Railway Postgres behind the API. A second Railway service (Option A scheduler) is wired for daily refresh. Remaining: API auth/rate limiting, ops maturity, and licensed-data/legal hardening.
+**Document version:** 0.7
 
 ---
 
@@ -753,6 +753,64 @@ Similar historical cases: 143
 Model version: lightgbm_return_10d_v003
 Prediction generated: 2026-05-28 19:15 KST
 ```
+
+### 11.8 Learning paradigm and update cadence
+
+Added 2026-06-06 after a design review. Records *why* the ML is shaped the way it
+is and how it should be refreshed, so future sessions do not re-litigate it.
+
+**Supervised is the backbone — by necessity.** The product goal ("predict price
+movement from 개인/기관/외국인 매수세") is a labeled mapping
+`f(flows, price context) → forward return`. Only supervised learning does this;
+it is exactly what `kospi_flow/ml` implements (LightGBM regressor +
+outperformance classifier + P10/P50/P90 quantile bands, walk-forward validated).
+Do **not** switch to an unsupervised predictor — unsupervised methods have no
+notion of "future price" and cannot forecast returns.
+
+**Unsupervised is optional and auxiliary, never the predictor.** It can only feed
+the supervised model as a *feature source*: regime clustering (add a regime id as
+a feature), anomaly scoring ("is today's flow unusual for this stock?" — already
+approximated by the 60d flow z-score and the PSI drift monitor), or
+dimensionality reduction on correlated flow features. Add these only if
+walk-forward IC shows they help; the MVP does not need them. No "mixture"
+decision is required to start — supervised first, unsupervised features later.
+
+**"Find a trend from the past" and "predict" are two layers that already coexist
+— not one model to reconcile.** The descriptive layer is the Phase 3 analytics
+(`/correlations`, `/events`, `/flow-return-profile` quintiles): interpretable
+"when 외국인 accumulated like this historically, what followed?". The predictive
+layer is the Phase 4 supervised ML. The analytics layer also sanity-checks the
+ML: monotone quintiles ⇒ real signal to learn; flat ⇒ the model is fitting noise.
+
+**Predict daily, retrain on a slow cadence — do NOT retrain daily.** The model is
+a fixed function; daily output already differs because the *inputs* (today's
+flows) change. Retraining every day is wrong: one trading day adds ~0.08% new
+rows (≈948 of ~1.1M), so the refit is essentially identical; it makes results
+non-reproducible (cannot tell if a prediction moved because flows or the model
+changed); and it defeats PSI drift monitoring, which compares live features to a
+*fixed* training baseline. Correct cadence:
+
+| Action | Cadence | Repo status |
+|---|---|---|
+| Predict on new flows | Daily, post-close | ✅ scheduler |
+| Re-evaluate walk-forward OOS IC | Weekly/monthly | ⚠️ manual (`train` reports it) |
+| Retrain the inference bundle | Monthly, or on drift/IC-decay | ⚠️ manual; sketches in §24 |
+| Regime/structural review | Quarterly | — |
+
+**The drift that matters is regime-scale, not daily.** Flow→return relationships
+shift across bull/bear and rate cycles. Two upgrades address this (concrete code
+in §24): (1) **rolling-window training** — fit the final bundle on a trailing
+window (e.g. ~3y / 756 trading days) instead of all history, so weights track the
+current regime and stale relationships age out; (2) **drift-triggered retrain** —
+let the existing PSI monitor (`fact_model_drift_daily`) recommend/enqueue a
+retrain instead of retraining on a calendar.
+
+**Honesty about the signal.** Daily investor flow is a weak, noisy predictor
+(realistic daily IC ≈ 0.0–0.05), strongest at 5–20d horizons, weakest at h=1. The
+model is a cross-sectional **ranking/tilt** tool ("which names outperform today's
+cross-section" — what "오늘의 주목 매수" surfaces), not an absolute price oracle.
+Daily Spearman IC is the headline metric; keep the uncertainty band + "not a
+guarantee" framing; emphasise 5–20d in the UI.
 
 ---
 
@@ -1651,6 +1709,307 @@ Next recommended task:
 
 ---
 
+### 2026-06-06 — Context doc reconciled against the actual codebase
+
+Status:
+- Completed (verification + doc sync only; no code change).
+
+Summary:
+- Audited the repository against this context document to confirm the recorded
+  state is accurate. Result: the codebase matches the 2026-06-03 entry exactly —
+  `git` HEAD is still the `4a60fc1` doc-update commit, so **no code has changed
+  since 2026-06-03**. Updated the header date/version and corrected one stale
+  figure in the §20 task brief.
+
+Verification performed:
+- `python -m pytest` → **107 passed** (matches the 2026-06-03 entry; LightGBM is
+  installed in this env so models auto-use it, with the benign sklearn
+  "no valid feature names" warnings noted previously).
+- `git log` HEAD = `4a60fc1` (the 2026-06-03 doc commit); working tree clean
+  except two untracked Next.js dev-server logs (`apps/web/frontend-dev-3000.*.log`,
+  not committed — local dev artifacts only).
+- CLI: 14 commands present (info, init-db, ingest, backfill, features, train,
+  predict, daily, drift, models, scheduler, serve, copy-db, validate) — matches §20.
+- API routers present: metadata, stocks, market, screeners, analytics, projection,
+  status, watchlists, models.
+- Frontend: 8 page routes present (`/`, stocks/[ticker], rankings, screener,
+  search, watchlists, models, data-status).
+- `models/` holds the five committed LightGBM bundles
+  (`gbm_return_{1,3,5,10,20}d.joblib`, ~4.9 MB each) + README, as documented.
+- Confirmed the open blocker is real: **no API auth / api_key / rate-limiting**
+  exists anywhere in `kospi_flow/` and there is no `api_key` setting in
+  `core/config.py`. Watchlists remain unauthenticated. Still the #1 next task.
+
+Doc corrections applied:
+- Header `Last updated` 2026-06-03 → 2026-06-06; version 0.6 → 0.7; noted the
+  Option A scheduler service in the Current-phase line.
+- §20 brief test count "~105 (last full run green at 101, +4 serve-port tests)" →
+  "107 tests pass (re-verified green 2026-06-06)", matching the 2026-06-03 entry.
+
+Known issues / blockers:
+- Unchanged. API auth + rate limiting is still the live-deploy blocker; the
+  Option A daily scheduler is wired/verified-on-Railway but its standing activation
+  (clearing the probe start command + ongoing run) is operator-side and not
+  verifiable from this environment.
+
+Next recommended task:
+- Unchanged from §20: **API auth + rate limiting** first, then the rest of
+  production maturity (Airflow/Prefect, MLflow + retrain-on-drift, real alert
+  channels, LicensedProvider, legal/data-license sign-off).
+
+---
+
+### 2026-06-06 — ML design direction recorded (supervised; predict-daily / retrain-on-drift)
+
+Status:
+- Design decision only (no code change). Rationale captured in §11.8, decisions
+  in §17, paste-ready upgrade code in §24.
+
+Summary:
+- Reviewed the ML approach against the product goal and the existing
+  implementation (`kospi_flow/ml/{dataset,validation,models,train,inference,drift}`).
+  Conclusion: the current supervised, cross-sectional, walk-forward gradient-
+  boosting design is the right backbone; the only real gaps are *update cadence*
+  and *regime adaptation*, not the learning paradigm.
+
+Key points:
+- **Supervised stays the backbone**; unsupervised only as an optional feature
+  source (regime clustering / anomaly), never the predictor. The goal is a
+  labeled flows→forward-return mapping, which is intrinsically supervised.
+- **Predict daily** (already wired in the scheduler: ingest→features→predict→
+  drift→validate) but **retrain on a slow cadence / on drift** — daily retraining
+  is explicitly rejected (a day adds ~0.08% of rows so the refit is ~identical,
+  it is non-reproducible, and it defeats the PSI drift monitor's fixed baseline).
+  "Different results every trading day" already comes from daily-varying inputs.
+- "Trend from the past" (Phase 3 analytics) and "predict" (Phase 4 ML) are
+  complementary layers that already coexist — not one model to reconcile.
+- Real drift is regime-scale → recommended upgrades are rolling-window training
+  and drift-triggered retrain (§24), not a paradigm change.
+
+Files/modules created or changed:
+- Doc only: §11.8 (new), §16 (this entry), §17 (3 rows), §18 (2 rows), §20 brief
+  (DO NEXT item added), §24 (new appendix with code sketches).
+
+Next recommended task:
+- Implement §24.1 (rolling-window training) and §24.2 (drift-triggered retrain),
+  then `python -m pytest`. Deployment caveat: on Railway the bundles are baked
+  into the scheduler image, so auto-retrain in prod needs a writable model store
+  (Volume/object storage); otherwise keep `retrain_on_drift=false` in prod and
+  retrain in CI/local → commit a new bundle → redeploy.
+
+---
+
+### 2026-06-06 — §25 Phase A implemented (retrain performance history)
+
+Status:
+- Completed. Full suite green (`python -m pytest` → **109 passed**, 107 → 109).
+
+Summary:
+- Implemented Phase A of the §25 plan: each retrain now keeps a performance record
+  instead of overwriting it, at ~KB cost (§24.3). Also recorded the Phase D
+  data-access decision: **retrain locally on the KR host** (option ii), not via a
+  GitHub Action reading Railway Postgres.
+
+Completed deliverables:
+- `ml/train.py`: `default_model_version()` → date stamp `vYYYYMMDD`;
+  `train_and_evaluate(model_version=None)` resolves to that default so each retrain
+  registers a *distinct* `ml_model_registry` row (latest stays active via the
+  existing `make_active` deactivation). `append_metrics_history()` writes one OOS
+  row per retrain to `<processed>/models/metrics_history.csv`
+  (date, model_name, model_version, horizon, mean_ic, icir, directional_accuracy,
+  auc, rmse, mae, n_samples, backend, trained_at).
+- `cli.py`: `train --model-version` flag (defaults to the date stamp), passed
+  through `cmd_train`.
+- Tests (`tests/test_phase5.py`, +2): date-stamp format; two retrains with
+  distinct versions retain both registry rows with exactly one active (the
+  latest), and the metrics CSV accumulates (header + ≥2 rows).
+
+Files changed:
+- `kospi_flow/ml/train.py`, `kospi_flow/cli.py`, `tests/test_phase5.py`.
+
+Important decisions / notes:
+- `metrics_history.csv` lives **next to the bundles** in `<processed>/models/`
+  (test-safe — tests point `processed_data_path` at a tmp dir), so the existing
+  "retrain → copy to `models/` → commit" step carries it into the committed dir.
+  The deployed inference bundle still overwrites the same `<model_name>.joblib`
+  filename; only the *record* accumulates (git footprint stays flat — §24.3).
+- Date granularity (`vYYYYMMDD`): two retrains on the same day share a version
+  (the later updates that day's row/CSV append). Fine for the monthly/on-drift
+  cadence; pass `--model-version` for finer control.
+- Not committed yet — left in the working tree for review (commit on the KR host
+  alongside the next real retrain, per the Phase D flow).
+
+Deferred (optional Phase A polish, not blocking): surface the history via
+`GET /models` + a `/models` frontend IC/accuracy-over-time chart.
+
+Next recommended task:
+- §25 Phase B (rolling-window training, §24.1) or Phase C (drift-triggered
+  retrain detection, §24.2) — both pure, offline, default-off code changes.
+
+---
+
+### 2026-06-06 — §25 Phase B implemented (rolling-window training)
+
+Status:
+- Completed (mechanism). Full suite green (`python -m pytest` → **112 passed**,
+  109 → 112). Default behaviour unchanged; the window value still needs tuning on
+  real data (KR host → user).
+
+Summary:
+- Added an optional trailing-window training mode so the deployed bundle (and the
+  walk-forward eval) can be fit on the last N trading dates instead of all
+  history, to track the current market regime (§24.1). Off by default
+  (`train_window_days=None` ⇒ all history, identical to before).
+
+Completed deliverables:
+- `core/config.py`: `train_window_days: int | None = None` (`KOSPI_TRAIN_WINDOW_DAYS`).
+- `ml/validation.py`: `walk_forward_splits(..., train_window=None)` caps each
+  fold's train block to its last N dates (rolling) vs the expanding default;
+  leak-free ordering + embargo preserved.
+- `ml/train.py`: `_trailing_window()` helper; the final fit + drift baseline now
+  use the windowed panel; walk-forward eval passes `train_window=
+  settings.train_window_days` so OOS metrics reflect how the bundle is fit; bundle
+  + `TrainReport` carry `train_window_days` and the bundle records
+  `fit_date_start`/`fit_date_end`.
+- `.env.example`: documented `KOSPI_TRAIN_WINDOW_DAYS` (commented; ~756 ≈ 3y).
+- Tests (`tests/test_ml.py`, +3): rolling walk-forward caps the train block vs
+  expanding; `_trailing_window` keeps exactly the last N dates (None/oversize =
+  unchanged); with `train_window_days=60` the bundle fit span starts later than
+  full history and ends at the latest date.
+
+Files changed:
+- `kospi_flow/core/config.py`, `kospi_flow/ml/validation.py`,
+  `kospi_flow/ml/train.py`, `.env.example`, `tests/test_ml.py`.
+
+Important decisions / notes:
+- The window is applied to **both** the final fit and the eval folds, so reported
+  OOS IC reflects the deployed model (not an all-history model). The drift
+  baseline is built from the windowed fit rows, so PSI compares live features
+  against the same window the model learned.
+- Backward compatible: the existing committed bundles lack the new keys; nothing
+  reads them as required, so old bundles still load/predict/drift unchanged.
+- **Follow-up (needs real data, user/KR host):** sweep windows (504 / 756 / 1260 /
+  all) and compare OOS IC, then set `KOSPI_TRAIN_WINDOW_DAYS` and record the
+  choice in §17. Until set, production behaviour is unchanged (all history).
+
+Next recommended task:
+- §25 Phase C (drift-triggered retrain detection, §24.2) — pure, offline,
+  default-off; new `ml/lifecycle.py` + `jobs/daily.py` wiring + a
+  `RETRAIN_RECOMMENDED` alert.
+
+---
+
+### 2026-06-06 — §25 Phase C implemented (drift-triggered retrain detection)
+
+Status:
+- Completed. Full suite green (`python -m pytest` → **114 passed**, 112 → 114).
+  Default behaviour unchanged (`retrain_on_drift=false`, `max_model_age_days=None`).
+
+Summary:
+- Turned the existing PSI drift monitor into a retrain *trigger*. The daily
+  pipeline now decides, per model, whether a retrain is warranted (drift `alert`
+  or bundle age ≥ cap) and either retrains-then-predicts (only if
+  `KOSPI_RETRAIN_ON_DRIFT=true`) or records `retrain_recommended` and emits a
+  `RETRAIN_RECOMMENDED` alert through the notifier. Prod keeps it off — the
+  actual retrain runs in CI/local (Phase D), since Railway's FS is ephemeral.
+
+Completed deliverables:
+- `ml/lifecycle.py` (new): pure `decide_retrain(drift_status, age_days,
+  max_model_age_days)` + `days_since(trained_at, today)` (None/garbage-safe).
+- `core/config.py`: `retrain_on_drift` (default False), `max_model_age_days`
+  (default None).
+- `jobs/daily.py`: the per-horizon drift step now computes the decision and
+  retrains+predicts when enabled, else returns `retrain_recommended (reasons)`.
+- `alerts/rules.py`: `_retrain_alerts` emits `RETRAIN_RECOMMENDED` (severity
+  warning) from the latest drift `alert` rows, added to `evaluate_alerts`
+  (complements, doesn't replace, `MODEL_DRIFT_ALERT`).
+- `.env.example`: `KOSPI_RETRAIN_ON_DRIFT=false` + commented `KOSPI_MAX_MODEL_AGE_DAYS`.
+- Tests (`tests/test_phase5.py`, +2): `decide_retrain` fires on alert / age≥cap and
+  stays quiet on warning/low_sample/young/no-cap; `days_since` parses ISO and
+  tolerates None/garbage; a persisted drift `alert` row yields a
+  `RETRAIN_RECOMMENDED` alert (alongside the drift report).
+
+Files changed:
+- New `kospi_flow/ml/lifecycle.py`; changed `kospi_flow/core/config.py`,
+  `kospi_flow/jobs/daily.py`, `kospi_flow/alerts/rules.py`, `.env.example`,
+  `tests/test_phase5.py`.
+
+Important decisions / notes:
+- A drift `"warning"` does NOT trigger — only `"alert"` (PSI ≥ alert band) or the
+  age cap. Warnings stay informational to avoid retrain churn.
+- Age-based *alerting* via the notifier is drift-row-driven (the
+  `RETRAIN_RECOMMENDED` alert reads drift `alert` rows); the age trigger always
+  drives the pipeline *action/step detail*. If age-only notifier alerts are
+  wanted later, have the daily step contribute the decision to the alert step.
+- Prod posture unchanged: `retrain_on_drift=false` on Railway → recommend only.
+
+Next recommended task:
+- §25 Phase D — the CI/local retrain runner (`scripts/retrain.py` + a KR-host
+  `make`/script that trains all horizons with a version stamp, overwrites the 5
+  bundles, appends `metrics_history.csv`, commits + pushes → Railway redeploys).
+  This is the remaining piece and runs on the user's KR host (decided 2026-06-06).
+  Also still open: tune `KOSPI_TRAIN_WINDOW_DAYS` on real data (Phase B follow-up).
+
+---
+
+### 2026-06-06 — §25 Phase D implemented (CI/local retrain runner)
+
+Status:
+- Completed (code). Full suite green (`python -m pytest` → **115 passed**,
+  114 → 115). The §25 ML-cadence plan (Phases A–D) is now **code-complete**; the
+  only remaining ML items are user/KR-host runtime actions (run the retrain; tune
+  the training window) — see "Open" below.
+
+Summary:
+- Added a one-command retrain runner that trains every configured horizon under a
+  single version stamp and **stages** the fresh bundles + a metrics row into the
+  committed `models/` dir, ready to commit + push (Railway redeploys with the new
+  bundles baked in). Runs on the KR host where the real data lives (decided
+  option ii, 2026-06-06).
+
+Completed deliverables:
+- `kospi_flow/jobs/retrain.py` (new): `retrain_all(horizons, …, sync=True,
+  repo_models_dir=None)` → trains each horizon (`train_and_evaluate` with one
+  `model_version`), then copies each `gbm_return_<h>d.joblib` from
+  `<processed>/models/` into the committed `models/` dir and **appends** one
+  `metrics_history.csv` row per horizon there (durable, accumulates across runs).
+  `repo_models_dir` override keeps tests off the real repo.
+- `cli.py`: `retrain` command (`--horizons/--tickers/--model-version/--splits/
+  --no-sync`) → prints per-horizon IC + synced files + the exact git commit/push
+  commands. Horizons default to `KOSPI_PREDICT_HORIZONS`.
+- `scripts/retrain.py` (new): thin wrapper → `cli retrain`.
+- `docs/RETRAIN.md` (new): KR-host runbook (when to retrain, the one command,
+  what gets committed, verify, and the one-time `KOSPI_TRAIN_WINDOW_DAYS` tuning).
+- Tests (`tests/test_jobs.py`, +1): `retrain_all` over 2 horizons syncs both
+  bundles into a temp models dir and writes one metrics row per horizon
+  (versioned), without touching the real repo.
+
+Files changed:
+- New `kospi_flow/jobs/retrain.py`, `scripts/retrain.py`, `docs/RETRAIN.md`;
+  changed `kospi_flow/cli.py`, `tests/test_jobs.py`.
+
+Important decisions / notes:
+- **Sync, don't train-into-`models/`:** bundles are trained into the gitignored
+  `<processed>/models/` then copied into the committed `models/`; the metrics CSV
+  is appended directly to the committed copy so history survives a cleared
+  processed dir.
+- The 5 `*.joblib` filenames are **overwritten** in `models/` (no versioned blobs
+  in git — §24.3); version lives in the registry row + CSV.
+- Not smoke-run via the CLI here on purpose: `cli retrain` without `--no-sync`
+  would sync sample-trained bundles into the real `models/` and clobber the
+  committed real-data bundles. The `retrain_all` path is covered by the temp-dir
+  test instead.
+
+Open (user / KR host — not code):
+- Run `python scripts/retrain.py` on the KR host, then commit + push.
+- Tune `KOSPI_TRAIN_WINDOW_DAYS` (Phase B follow-up) and record the choice in §17.
+
+Next recommended task:
+- Back to §20 DO NEXT #1: **API auth + rate limiting** (still the public-exposure
+  blocker). The ML-cadence track (§25) is code-complete.
+
+---
+
 ## 17. Decision log
 
 | Date | Decision | Rationale |
@@ -1681,6 +2040,11 @@ Next recommended task:
 | 2026-06-02 | Adopt platform `DATABASE_URL` + rewrite `postgres://`→`postgresql+psycopg://`. | Railway/Render hand out un-prefixed `postgres://` DSNs; this makes them work without manual edits and with psycopg3. |
 | 2026-06-03 | Production API base is `https://acquin-production.up.railway.app`; Vercel production frontend is `https://acquin.vercel.app`. | The earlier `web-production-c9e69.up.railway.app` Railway domain returned fallback 404s and was not the working API service route. Vercel must use the verified Railway API domain in `NEXT_PUBLIC_API_BASE`; Railway CORS must allow the Vercel production origin. |
 | 2026-06-03 | Daily refresh = a **second Railway service** running `cli scheduler`, writing to Postgres via the internal `${{Postgres.DATABASE_URL}}`; its own image (`Dockerfile.scheduler`) with pykrx/lightgbm so the slim API image is untouched. | Satisfies "update Postgres daily without a local DB/space": the scheduler writes straight to Postgres and computes the KST date itself (no per-day args, no `copy-db`). Gated on confirming KRX is reachable from Railway's datacenter IP. |
+| 2026-06-06 | ML stays **supervised** (LightGBM regressor/classifier/quantile); unsupervised only as an optional feature source (regime/anomaly), never the predictor. | The goal is a labeled flows→forward-return mapping; only supervised learning forecasts returns. Unsupervised has no future-price target. See §11.8. |
+| 2026-06-06 | **Predict daily, retrain on a slow cadence (monthly) or on drift — never daily.** | A new day adds ~0.08% of rows (refit ≈ identical), daily retrain is non-reproducible, and it defeats PSI drift monitoring (which needs a fixed baseline). Daily-varying output already comes from daily-varying inputs. |
+| 2026-06-06 | Move the final inference fit to a trailing **rolling window** (default off via `KOSPI_TRAIN_WINDOW_DAYS`) and add a **drift/age-triggered retrain** decision. | The real drift is regime-scale; rolling weights track the current regime and let stale relationships age out. Reuses the existing PSI monitor as the trigger. Code in §24. |
+| 2026-06-06 | Keep retrain **performance history in the DB (+ a small `metrics_history.csv`)**, not as versioned model blobs; keep the 5 `models/*.joblib` filenames **overwriting** in git. | Metrics rows are ~KB (free to keep forever); joblib bundles are ~24.5 MB/retrain and compress/diff poorly, so versioning them in git grows the repo permanently. History lives cheaply in Postgres/CSV; git ships only the latest bundle. See §24.3. |
+| 2026-06-06 | Retraining stays in **CI/local** (not in-prod); CI/local ships new bundles to Railway via commit→push→auto-deploy. | Railway bakes bundles into the image (ephemeral FS shadows any in-container retrain). In-prod auto-retrain would need a writable Volume (deferred). CI/local retrain matches the existing refresh flow. See §25 Phase D. |
 ---
 
 ## 18. Known issues and technical debt
@@ -1708,6 +2072,9 @@ Next recommended task:
 | Preferred-share exclusion only | Open | Screener excludes preferred shares; ETF/SPAC/REIT exclusion still needs an instrument-type field/source. |
 | KRX requires login (KRX_ID/KRX_PW) | Resolved 2026-06-03 | pykrx 1.2.8 auto-logs into the KRX data portal via `KRX_ID`/`KRX_PW`; without them flow/foreign/cap/index/ticker endpoints return empty (only OHLCV). Confirmed on this machine AND Railway. With creds set, the Railway probe returned real data (stocks=948, real flows/foreign), so Railway's IP is NOT blocked — Option A is live. The earlier "US IP blocked" note (2026-06-01) is superseded: it was the missing login, surfaced once KRX enforced it. |
 | Model bundle absent on Railway containers | Resolved | Five LightGBM bundles committed under `models/` and baked into the scheduler image (`Dockerfile.scheduler` → `/app/data/processed/models/`); scheduler predicts all horizons in `KOSPI_PREDICT_HORIZONS` (default 1,3,5,10,20). Do NOT mount a Volume at `/app/data/processed` (it would shadow them). Refresh = retrain locally → copy to `models/` → commit → redeploy. |
+| Model fit on full 5y history, not a rolling window | Mechanism shipped (2026-06-06, §25 Phase B); window value TBD | `KOSPI_TRAIN_WINDOW_DAYS` now caps the final fit AND the walk-forward eval to a trailing window; bundle records `train_window_days` + `fit_date_start/end`. Default `None` = all history (unchanged). **Open:** tune the window (504/756/1260/all) on real-data OOS IC and set it (needs KR-host data → user). |
+| No drift-triggered / scheduled retrain | Detection shipped (2026-06-06, §25 Phase C); prod retrain stays CI/local | Drift `alert` or `max_model_age_days` now drive `ml/lifecycle.decide_retrain` in the daily pipeline → a `RETRAIN_RECOMMENDED` alert. With `KOSPI_RETRAIN_ON_DRIFT=true` the pipeline retrains+predicts; prod keeps it **false** (Railway FS is ephemeral), so the actual retrain runs in CI/local (Phase D). True in-prod auto-retrain still needs a writable model store. |
+| Retrain performance history not retained | Resolved (2026-06-06, §25 Phase A) | `train_and_evaluate` now stamps a date-based `model_version` (`vYYYYMMDD`) by default so each retrain adds an `ml_model_registry` row (latest stays active) and appends `<processed>/models/metrics_history.csv`. Override with `--model-version`. |
 
 ---
 
@@ -1773,16 +2140,16 @@ Use this brief to start the next coding-agent session.
 ```text
 You are working on the KOSPI Investor Flow Intelligence Platform.
 
-Read this context doc first (esp. the 2026-06-02 progress entries). The Phases
-0–5 MVP is CODE-COMPLETE and the app is DEPLOYED. ~105 tests
-(`python -m pytest`; last full run green at 101, +4 serve-port tests).
+Read this context doc first (esp. the 2026-06-03 progress entries). The Phases
+0–5 MVP is CODE-COMPLETE and the app is DEPLOYED. 107 tests pass
+(`python -m pytest`; re-verified green 2026-06-06).
 
 WHAT EXISTS
 - Backend: kospi_flow.{core,data,analytics,ml,api,jobs,alerts}. FastAPI
   (apps.api.main:app) — stocks/market/screeners/analytics/projection/status/
   watchlists/models endpoints + /market/{top-picks,closes,index}, CORS, envelope
-  responses. CLI: info/init-db/ingest/backfill/features/train/predict/daily/
-  drift/models/scheduler/serve/copy-db/validate.
+  responses. CLI: info/init-db/ingest/backfill/features/train/retrain/predict/
+  daily/drift/models/scheduler/serve/copy-db/validate.
 - Analytics (the product core): per-stock flow→price relationship —
   /correlations, /events, and /flow-return-profile (quintile analysis); surfaced
   on the stock page (heatmap + quintile chart + event study).
@@ -1815,10 +2182,17 @@ DO NEXT (in order)
    public and the API is unauthenticated (anyone can read/modify watchlists).
    Add an API-key dependency (KOSPI_API_KEY setting) + simple rate limiting; have
    the frontend send the key. This is the immediate §20-step-4 priority.
-2. Rest of production maturity (§20 step 4): Airflow/Prefect scheduling, MLflow
-   registry + retrain-on-drift, real alert channels (email/Kakao/Telegram),
-   LicensedProvider for a licensed feed, legal/data-license sign-off.
-3. Optional polish: sector filter / sortable tables on picks & rankings; a
+2. **ML cadence + regime adaptation** (design recorded 2026-06-06 in §11.8;
+   paste-ready code in §24): (a) rolling-window training — fit the final bundle on
+   a trailing window via `KOSPI_TRAIN_WINDOW_DAYS` (§24.1); (b) drift-triggered
+   retrain — wire the existing PSI monitor to recommend/enqueue a retrain (§24.2).
+   Predict daily / retrain slow — do NOT retrain daily. Deployment caveat: in-prod
+   auto-retrain needs a writable model store; otherwise keep `retrain_on_drift=
+   false` in prod and retrain in CI/local → commit a new bundle → redeploy.
+3. Rest of production maturity (§20 step 4): Airflow/Prefect scheduling, MLflow
+   registry + automated retrain-on-drift, real alert channels (email/Kakao/
+   Telegram), LicensedProvider for a licensed feed, legal/data-license sign-off.
+4. Optional polish: sector filter / sortable tables on picks & rankings; a
    compare view.
 
 CANNOT do from this env: real pykrx ingest (KR-IP only), and running the live
@@ -1909,3 +2283,333 @@ These should be resolved as implementation progresses.
 | Walk-forward validation | Time-based model validation that simulates future prediction. |
 | IC | Information coefficient; rank correlation between model predictions and realized returns. |
 | ICIR | Information coefficient information ratio; stability of IC over time. |
+
+---
+
+## 24. ML upgrade sketches (rolling-window training + drift-triggered retrain)
+
+Paste-ready sketches for the two upgrades from §11.8 / the 2026-06-06 decisions.
+Written against the **current** interfaces (`ml/train.py`, `ml/drift.py`,
+`ml/registry.py`, `jobs/daily.py`, `core/config.py`, `alerts/rules.py`). NOT yet
+applied — implement and run `python -m pytest` in a follow-up session. Both are
+backwards-compatible (off by default), so they can land without changing today's
+behaviour until the env vars are set.
+
+### 24.1 Rolling-window training
+
+Goal: fit the *final inference bundle* on a trailing window of trading dates
+instead of all history, so the weights track the current regime. Default `None` =
+all-history (today's behaviour).
+
+**`core/config.py`** — new setting (add near the ML/inference block):
+
+```python
+    # --- ML training -------------------------------------------------------
+    #: Fit the final inference bundle on only the last N trading dates
+    #: (None = all history). ~756 ≈ 3 trading years. Walk-forward eval can reuse
+    #: this cap via walk_forward_splits(train_window=...).
+    train_window_days: int | None = Field(default=None)
+```
+
+Env: `KOSPI_TRAIN_WINDOW_DAYS=756`.
+
+**`ml/train.py`** — trailing-window helper, and use it for the final fit only
+(walk-forward folds above are unchanged unless you also adopt the optional eval
+cap below):
+
+```python
+def _trailing_window(panel: pd.DataFrame, window_days: int | None) -> pd.DataFrame:
+    """Keep only rows within the last `window_days` trading dates (None = all)."""
+    if not window_days:
+        return panel
+    unique = sorted(pd.Series(panel["date"]).dropna().unique())
+    if len(unique) <= window_days:
+        return panel
+    keep = set(unique[-window_days:])
+    return panel[panel["date"].isin(keep)].reset_index(drop=True)
+```
+
+Then inside `train_and_evaluate`, in the `if save:` block, fit on the windowed
+panel and record the span in the bundle:
+
+```python
+        fit_panel = _trailing_window(panel, settings.train_window_days)
+        X, y = fit_panel[feature_cols], fit_panel["y_reg"].to_numpy()
+        bundle = {
+            "regressor": make_regressor().fit(X, y),
+            "classifier": make_classifier().fit(X, fit_panel["y_cls"].to_numpy()),
+            "quantiles": {
+                q: make_quantile_regressor(q).fit(X, y) for q in (0.1, 0.5, 0.9)
+            },
+            "feature_cols": feature_cols,
+            "feature_baseline": build_baseline(X, feature_cols),  # built from the window
+            "train_window_days": settings.train_window_days,
+            "fit_date_start": str(fit_panel["date"].min()),
+            "fit_date_end": str(fit_panel["date"].max()),
+            # ... existing horizon/model_name/version/backend/trained_at ...
+        }
+```
+
+Note: `feature_baseline` is built from `X` (the windowed fit data), so PSI then
+compares live features against the *same* window the model learned — correct.
+
+Optional — make the walk-forward eval rolling too, for consistency
+(`ml/validation.py`):
+
+```python
+def walk_forward_splits(dates, n_splits=3, embargo=0, min_train=30,
+                        train_window=None):
+    ...
+    for k in range(1, n_splits + 1):
+        train_end = min_train + (k - 1) * test_size
+        train_start = 0 if not train_window else max(0, train_end - train_window)
+        test_start = train_end + embargo
+        if test_start >= n:
+            break
+        folds.append(Fold(train_dates=unique[train_start:train_end],
+                          test_dates=unique[test_start:min(test_end, n)]))
+```
+
+and pass `train_window=settings.train_window_days` from `train_and_evaluate`.
+
+Tests (`tests/test_ml.py`): `_trailing_window` keeps only the last N dates;
+bundle carries `fit_date_start/end`; a small window still trains and predicts.
+
+### 24.2 Drift-triggered retrain
+
+Goal: turn the existing PSI monitor into a retrain *trigger*. Keep the decision
+pure/testable; wire it into the daily pipeline; respect the deployment caveat.
+
+**`core/config.py`** — triggers:
+
+```python
+    #: If true, the daily pipeline retrains a model when decide_retrain() fires;
+    #: if false (prod default with baked-in bundles) it only emits an alert.
+    retrain_on_drift: bool = Field(default=False)
+    #: Retrain when the active bundle is older than this many days (None = off).
+    max_model_age_days: int | None = Field(default=None)
+```
+
+**`ml/lifecycle.py`** (new) — the policy, pure and testable:
+
+```python
+"""Retrain-trigger policy (context doc §24.2). Pure + testable."""
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import date, datetime
+
+
+@dataclass
+class RetrainDecision:
+    should_retrain: bool
+    reasons: list[str]
+
+
+def days_since(trained_at: str | None, today: date) -> int | None:
+    if not trained_at:
+        return None
+    try:
+        return (today - datetime.fromisoformat(trained_at).date()).days
+    except ValueError:
+        return None
+
+
+def decide_retrain(*, drift_status: str, age_days: int | None,
+                   max_model_age_days: int | None) -> RetrainDecision:
+    # drift_status in {"ok","warning","alert","low_sample","unknown"}
+    reasons: list[str] = []
+    if drift_status == "alert":
+        reasons.append("feature drift PSI in alert band")
+    if max_model_age_days and age_days is not None and age_days >= max_model_age_days:
+        reasons.append(f"model age {age_days}d >= {max_model_age_days}d")
+    return RetrainDecision(bool(reasons), reasons)
+```
+
+**`jobs/daily.py`** — replace the per-horizon drift block inside the `for h in
+horizons:` loop with a drift+decide+act closure (`end` is the pipeline's end
+date, already in scope):
+
+```python
+        from kospi_flow.ml.drift import compute_drift
+        from kospi_flow.ml.lifecycle import decide_retrain, days_since
+
+        def _drift_and_maybe_retrain(mn=model_name, h=h):
+            bundle = load_bundle(mn, settings)
+            status = compute_drift(database, bundle, settings=settings)["status"]
+            decision = decide_retrain(
+                drift_status=status,
+                age_days=days_since(bundle.get("trained_at"), end),
+                max_model_age_days=settings.max_model_age_days,
+            )
+            if decision.should_retrain and settings.retrain_on_drift:
+                from kospi_flow.ml.train import train_and_evaluate
+                train_and_evaluate(database, horizon=h, tickers=tickers, settings=settings)
+                predict_and_store(database, mn, tickers=tickers, settings=settings)
+                return f"status={status} retrained={decision.reasons}"
+            return f"status={status} retrain_recommended={decision.reasons}"
+
+        _run_step(report, f"drift_{h}d", _drift_and_maybe_retrain)
+```
+
+**`alerts/rules.py`** — a "recommend retrain" alert from the latest drift rows,
+so the recommendation reaches the configured notifier (call it from
+`evaluate_alerts`: `alerts.extend(_retrain_alerts(s))`):
+
+```python
+def _retrain_alerts(session: Session) -> list[Alert]:
+    """Recommend a retrain when the latest drift status is 'alert'."""
+    latest = session.scalar(select(func.max(FactModelDriftDaily.date)))
+    if latest is None:
+        return []
+    rows = session.execute(
+        select(FactModelDriftDaily).where(FactModelDriftDaily.date == latest)
+    ).scalars().all()
+    return [
+        Alert(code="RETRAIN_RECOMMENDED", severity="warning",
+              message=f"Retrain recommended for '{r.model_name}' (max PSI={r.max_psi:.3f})",
+              context={"model_name": r.model_name, "max_psi": r.max_psi})
+        for r in rows if r.status == "alert"
+    ]
+```
+
+(De-dupe with the existing `_drift_alerts` if you don't want both a
+`MODEL_DRIFT_ALERT` and a `RETRAIN_RECOMMENDED` for the same row — or fold the
+recommendation into the existing drift-alert message.)
+
+**Deployment caveat (important).** On Railway the five bundles are baked into the
+scheduler image at `/app/data/processed/models/` (no Volume — a Volume there
+would *shadow* them, per §18). So with `retrain_on_drift=true` in prod, a retrain
+writes a new bundle into the *ephemeral* container filesystem: it serves until
+the next redeploy, then reverts to the committed bundle. Two acceptable postures:
+
+- **Prod default `retrain_on_drift=false`** → the daily run only emits
+  `RETRAIN_RECOMMENDED`; you retrain in CI/local, commit the new bundle to
+  `models/`, and redeploy (matches today's "refresh = retrain → commit →
+  redeploy" flow).
+- **True in-prod retrain** → mount a writable Volume at a *separate* path (e.g.
+  `/app/models_live`) and have `train.model_dir()` / `inference.load_bundle()`
+  prefer it when present, falling back to the baked-in dir. Then
+  `retrain_on_drift=true` persists across restarts.
+
+Tests (`tests/test_phase5.py`): `decide_retrain` fires on `"alert"` and on age ≥
+cap, stays quiet on `"ok"`/`"low_sample"`; `days_since` parses ISO and tolerates
+`None`/garbage; `_retrain_alerts` emits only for alert-status rows.
+
+### 24.3 Recording retrain performance + disk footprint
+
+Performance is **already recorded** by `register_model` into `ml_model_registry`:
+dedicated columns `mean_ic` / `icir` / `rmse` / `mae` / `auc`, plus the full
+`TrainReport` as a JSON `metrics` blob. `directional_accuracy` (the regressor's
+up/down hit rate) and the baseline-vs-main breakdown live inside that JSON. The
+only change needed to keep a *history* across retrains is to stop overwriting the
+row.
+
+Key facts:
+- `MlModelRegistry` PK = `(model_name, model_version)`; `register_model` does
+  `s.merge(...)`. With the default `model_version="v001"`, every retrain
+  overwrites the same row **and** the bundle overwrites the same file → latest
+  only, no history.
+- To accumulate history, pass a unique `model_version` per retrain (date stamp or
+  git short SHA), e.g. `train_and_evaluate(..., model_version="v2026-06")`.
+- `register_model(make_active=True)` already flips older versions inactive, so the
+  active-version semantics keep working while old rows remain for history.
+
+Disk:
+
+| Stored per retrain | Size | Growth |
+|---|---|---|
+| Performance rows (5 horizons + JSON metrics) | ~25 KB | ~3 MB / 10y monthly — negligible; keep all |
+| Model bundles (`gbm_return_{1,3,5,10,20}d.joblib`, ~4.9 MB ea) | ~24.5 MB | flat if filenames overwrite; ~294 MB/yr if versioned monthly |
+
+Git caveat: `models/*.joblib` are committed and baked into the Railway image. Git
+keeps every blob forever and joblib compresses poorly (diffs badly), so **keep
+the same 5 filenames in git** (overwrite the latest, ship that). Store the
+accuracy *history* in the DB and/or a small committed metrics log — NOT as
+versioned blobs. If versioned artifacts are ever needed for rollback/repro, use
+CI artifact storage / object storage / git LFS, not plain git.
+
+Recommended companion artifact: append a tiny `models/metrics_history.csv` (one
+row per horizon per retrain: `date, model_version, horizon, mean_ic, icir,
+directional_accuracy, auc, n_samples`) so the history is human-readable and
+diff-friendly without a DB connection. KB-scale.
+
+---
+
+## 25. Implementation plan — ML cadence & performance (2026-06-06 session)
+
+Scope: the ML work designed this session — performance-history recording (§24.3),
+rolling-window training (§24.1), drift-triggered retrain detection (§24.2) — plus
+the CI/local retrain workflow that ships new bundles to Railway. Each phase is
+independently shippable, **off by default**, and gated by `python -m pytest`
+(currently 107 green). Commit per phase on a branch; push only when asked; update
+this doc per §21 after each phase.
+
+**Out of scope here** (tracked elsewhere in §20): API auth + rate limiting (still
+the #1 public-exposure blocker, orthogonal to this ML work), MLflow,
+Airflow/Prefect, and true in-prod auto-retrain via a writable Volume (deferred —
+see the §24.2 caveat; this plan keeps retrain in CI/local).
+
+Suggested order A → D. **A and B are independent** (either order); C is small and
+depends on nothing; D ties A–C together and is the only phase with an external
+dependency (data access).
+
+### Phase A — Performance history (smallest, highest value, do first) — ✅ DONE 2026-06-06
+- Stamp a unique `model_version` per retrain (date or git short SHA) so
+  `ml_model_registry` rows accumulate instead of overwriting (§24.3).
+- Append `models/metrics_history.csv` in `train_and_evaluate` (or a thin wrapper):
+  one row/horizon/retrain (date, version, horizon, mean_ic, icir,
+  directional_accuracy, auc, n_samples).
+- Optional: extend `GET /models` (and/or `cli models`) to return the history, and
+  a small `/models` frontend line chart of IC / directional-accuracy over time.
+- Files: `ml/train.py` (version stamp + CSV append), `cli.py` (ensure `train
+  --model-version`), optionally `api/routers/models.py`, `apps/web/app/models/page.tsx`.
+- Acceptance: two retrains with different versions leave two registry rows, the
+  latest active; `metrics_history.csv` has both. Tests in `test_ml`/`test_phase5`.
+
+### Phase B — Rolling-window training (§24.1) — ✅ DONE 2026-06-06 (mechanism; window value TBD on real data)
+- Add `train_window_days` setting; `_trailing_window`; fit the final bundle on the
+  window; bundle carries `fit_date_start/end` + `train_window_days`; optional
+  rolling walk-forward via `walk_forward_splits(train_window=...)`.
+- Default `None` = unchanged behaviour → safe to merge before choosing a window.
+- Files: `core/config.py`, `ml/train.py`, (opt) `ml/validation.py`, `.env.example`.
+- Acceptance: with `KOSPI_TRAIN_WINDOW_DAYS=756` the bundle fit span ≈ last 756
+  trading dates; metrics still computed; prediction shape unchanged. Tests.
+- Tuning (after wiring, on real data): compare OOS IC at a few windows
+  (e.g. 504 / 756 / 1260 / all) and pick the best; record the choice in §17.
+
+### Phase C — Drift-triggered retrain detection (§24.2) — ✅ DONE 2026-06-06
+- Add `retrain_on_drift` (default False) + `max_model_age_days`; new
+  `ml/lifecycle.py` (`decide_retrain`, `days_since`); wire into the `jobs/daily.py`
+  drift step; add a `RETRAIN_RECOMMENDED` alert in `alerts/rules.py`.
+- Prod posture: keep `retrain_on_drift=false` on Railway → the daily run only
+  *recommends* via alert; the actual retrain happens in Phase D.
+- Files: `core/config.py`, `ml/lifecycle.py` (new), `jobs/daily.py`,
+  `alerts/rules.py`, `tests/test_phase5.py`, `.env.example`.
+- Acceptance: `decide_retrain` fires on drift=alert and on age ≥ cap, quiet
+  otherwise; the daily pipeline emits `RETRAIN_RECOMMENDED` when drift=alert and
+  does NOT retrain in prod. Tests.
+
+### Phase D — CI/local retrain workflow (ships bundles to Railway) — ✅ DONE 2026-06-06 (runner shipped; runs on KR host)
+- A retrain runner — `scripts/retrain.py` (thin wrapper: train every horizon in
+  `KOSPI_PREDICT_HORIZONS` with a date/SHA `model_version`, overwrite the 5
+  `models/*.joblib`, append `metrics_history.csv`) plus a GitHub Actions workflow
+  (manual dispatch and/or monthly cron) that runs it, commits, and pushes →
+  Railway auto-deploys on push.
+- **KEY DEPENDENCY — DECIDED 2026-06-06: (ii) retrain locally on the KR host**
+  where the real data already lives, then push (commit→push→Railway auto-deploy).
+  So "CI" here = a local script/`make` target on the KR host, not GitHub Actions
+  reading Railway Postgres. (Option (i) — a GitHub Action with a read-only
+  `KOSPI_DATABASE_URL` secret — remains a future alternative if local retrain
+  becomes a chore.)
+- Git: overwrite the same 5 filenames (no versioned blobs in git); commit the
+  small `metrics_history.csv`. Bundle footprint stays flat (~24.5 MB).
+- Files: `.github/workflows/retrain.yml` (new), `scripts/retrain.py` (new),
+  `docs/RETRAIN.md` (new) or extend `docs/DAILY_REFRESH_RAILWAY.md`.
+- Acceptance: a manual workflow run produces updated bundles + a new metrics row,
+  pushes, and the Railway API serves predictions from the new bundle post-deploy.
+
+### Cross-cutting
+- `python -m pytest` stays green at each phase (extend, don't break, the 107).
+- After each phase, update §15/§16/§17/§18 and check items off this plan.
+- Record the two real tuning decisions when made: chosen `train_window_days`
+  (Phase B) and retrain cadence/trigger thresholds (Phase C/D).

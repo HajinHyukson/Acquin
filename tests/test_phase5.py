@@ -125,6 +125,42 @@ def test_train_registers_model_and_builds_baseline(env):
     assert bundle["feature_baseline"], "training should store a drift baseline"
 
 
+def test_default_model_version_is_date_stamped():
+    from kospi_flow.ml.train import default_model_version
+
+    v = default_model_version()
+    assert v.startswith("v") and len(v) == 9 and v[1:].isdigit()  # vYYYYMMDD
+
+
+def test_retrain_accumulates_history_and_metrics_csv(env):
+    db, settings = env
+    r1 = train_and_evaluate(
+        db, horizon=5, tickers=TICKERS, model_version="v2026-06-01", settings=settings
+    )
+    r2 = train_and_evaluate(
+        db, horizon=5, tickers=TICKERS, model_version="v2026-06-02", settings=settings
+    )
+    assert r1.model_version == "v2026-06-01" and r2.model_version == "v2026-06-02"
+
+    with db.session() as s:
+        rows = [m for m in list_models(s) if m.model_name == r1.model_name]
+        versions = {m.model_version for m in rows}
+        # Both retrains retained (history accumulates, not overwritten).
+        assert {"v2026-06-01", "v2026-06-02"} <= versions
+        # Exactly one active version, and it is the latest retrain.
+        actives = [m for m in rows if m.is_active]
+        assert len(actives) == 1
+        assert get_active_model(s, r1.model_name).model_version == "v2026-06-02"
+
+    # Human-readable performance log sits next to the bundles and is appended to.
+    csv_path = settings.processed_data_path / "models" / "metrics_history.csv"
+    assert csv_path.exists()
+    lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[0].startswith("date,model_name,model_version,horizon,")
+    assert len(lines) - 1 >= 2  # header + >= 2 appended retrains
+    assert any("v2026-06-02" in line for line in lines[1:])
+
+
 def test_psi_helpers():
     import numpy as np
     import pandas as pd
@@ -207,6 +243,50 @@ def test_watchlist_flow_alert_rule(env):
     # Very low threshold -> the watchlisted ticker should trigger.
     alerts = evaluate_alerts(db, settings=settings, watchlist_flow_threshold=1.0)
     assert any(a.code == "WATCHLIST_FLOW" for a in alerts)
+
+
+# --- Phase C: retrain trigger ---------------------------------------------
+def test_decide_retrain_and_days_since():
+    from kospi_flow.ml.lifecycle import days_since, decide_retrain
+
+    # days_since parses ISO and tolerates None/garbage.
+    assert days_since("2026-06-01T10:00:00", date(2026, 6, 11)) == 10
+    assert days_since(None, date(2026, 6, 11)) is None
+    assert days_since("not-a-date", date(2026, 6, 11)) is None
+
+    # Fires on a drift alert, and on age >= cap.
+    assert decide_retrain(
+        drift_status="alert", age_days=1, max_model_age_days=None
+    ).should_retrain
+    assert decide_retrain(
+        drift_status="ok", age_days=40, max_model_age_days=30
+    ).should_retrain
+
+    # Quiet otherwise: a warning, a young model, or no age cap don't trigger.
+    assert not decide_retrain(
+        drift_status="warning", age_days=5, max_model_age_days=30
+    ).should_retrain
+    assert not decide_retrain(
+        drift_status="low_sample", age_days=None, max_model_age_days=30
+    ).should_retrain
+    assert not decide_retrain(
+        drift_status="ok", age_days=5, max_model_age_days=None
+    ).should_retrain
+
+
+def test_retrain_recommended_alert_on_drift_alert(db):
+    """A persisted drift 'alert' row yields a RETRAIN_RECOMMENDED alert."""
+    with db.session() as s:
+        s.add(
+            FactModelDriftDaily(
+                date=date(2022, 12, 30), model_name="gbm_return_5d",
+                model_version="v1", max_psi=0.40, mean_psi=0.30,
+                status="alert", n_rows=500, detail={},
+            )
+        )
+    codes = {a.code for a in evaluate_alerts(db)}
+    assert "RETRAIN_RECOMMENDED" in codes  # actionable signal
+    assert "MODEL_DRIFT_ALERT" in codes    # the drift report still fires too
 
 
 # --- pipeline integration -------------------------------------------------

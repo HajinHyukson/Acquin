@@ -116,11 +116,16 @@ Key endpoints (all wrapped in a `{data, metadata}` envelope):
 python -m kospi_flow.cli drift --horizon 5      # compute + store PSI feature drift
 python -m kospi_flow.cli models                 # list registered models + metrics
 python -m kospi_flow.cli scheduler              # blocking KST job scheduler (§5 timetable)
+python scripts/retrain.py                       # retrain all horizons + stage models/ for commit
 ```
 
 The `daily` pipeline runs ingest → features → predict → drift → validate →
-alerts, with retries and per-step error capture. Alerts dispatch through a
-configurable notifier (`KOSPI_ALERT_CHANNEL` = none|console|file|webhook). See
+alerts, with retries and per-step error capture. When feature drift hits the PSI
+alert band (or a bundle exceeds `KOSPI_MAX_MODEL_AGE_DAYS`) it emits a
+`RETRAIN_RECOMMENDED` alert; retrain on the data host with `scripts/retrain.py`
+then commit + push (see [`docs/RETRAIN.md`](docs/RETRAIN.md)). Alerts dispatch
+through a configurable notifier (`KOSPI_ALERT_CHANNEL` = none|console|file|webhook).
+See
 [`docs/SCHEDULING.md`](docs/SCHEDULING.md), [`docs/SECURITY.md`](docs/SECURITY.md),
 and [`docs/DATA_LICENSING.md`](docs/DATA_LICENSING.md). A sample crontab is at
 `infra/cron/kospi-flow.cron`.
