@@ -199,6 +199,11 @@ def top_picks(
     limit: int = Query(default=20, ge=1, le=100),
     lookback_days: int = Query(default=5, ge=1, le=60),
     notable_only: bool = True,
+    model: str | None = Query(
+        default=None,
+        description="Rank by this model's predictions (default: the internal "
+        "gbm_return family). Walk-forward backtest rows are always excluded.",
+    ),
 ) -> dict:
     """Today's top ML picks: highest predicted return, among stocks with recent
     notable buying (외국인+기관 net buy > 0 over the lookback window).
@@ -206,10 +211,15 @@ def top_picks(
     Ranked by the latest stored prediction for ``horizon``. Set
     ``notable_only=false`` to rank purely by ML projection.
     """
+    model_filter = (
+        FactMlPredictionDaily.model_name == model
+        if model
+        else FactMlPredictionDaily.model_name.like("gbm_return_%")
+    )
     latest_date = session.scalar(
-        select(func.max(FactMlPredictionDaily.date)).where(
-            FactMlPredictionDaily.horizon_days == horizon
-        )
+        select(func.max(FactMlPredictionDaily.date))
+        .where(FactMlPredictionDaily.horizon_days == horizon)
+        .where(model_filter)
     )
     if latest_date is None:
         return envelope(
@@ -225,6 +235,7 @@ def top_picks(
         )
         .where(FactMlPredictionDaily.horizon_days == horizon)
         .where(FactMlPredictionDaily.date == latest_date)
+        .where(model_filter)
     ).all()
     best: dict[str, tuple] = {}
     for tk, pr, pp, prob in preds:

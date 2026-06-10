@@ -113,6 +113,13 @@ class Settings(BaseSettings):
     #: Comma-separated allowed CORS origins; ``*`` allows all (dev default).
     cors_origins: str = Field(default="*")
 
+    # --- External model socket ----------------------------------------------
+    #: Shared secret for ``POST /models/{name}/predictions`` (X-API-Key header)
+    #: so external models (e.g. a sentiment model) can push predictions into
+    #: ``fact_ml_prediction_daily``. ``None`` (default) disables the write
+    #: endpoint entirely — safe for the current unauthenticated deployment.
+    ingest_api_key: str | None = Field(default=None)
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

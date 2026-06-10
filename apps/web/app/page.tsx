@@ -38,32 +38,34 @@ export default async function HomePage() {
   return (
     <div>
       <h1>시장 개요</h1>
-      <div className="card">
-        <div>기준일: {overview.as_of ?? "-"}</div>
-        <div>종목 수: {overview.n_stocks}</div>
-        <div>
-          {benchLabel} 1일 수익률:{" "}
-          <span className={overview.market_return_1d >= 0 ? "pos" : "neg"}>
-            {overview.market_return_1d != null
-              ? (overview.market_return_1d * 100).toFixed(2) + "%"
-              : "-"}
-          </span>
-        </div>
-        <div className="muted">벤치마크: {overview.benchmark_source}</div>
-      </div>
-
-      {/* Today's notable ML picks */}
-      <TopPicks initialRows={picks} initialHorizon={5} />
-
-      {/* Search any stock (replaces the full list) */}
-      <StockSearch stocks={stocks} />
-
-      {index.length > 0 && (
+      <div className="grid2">
         <div className="card">
-          <h2>{benchLabel}</h2>
-          <IndexChart rows={index} name={benchLabel} />
+          <div>기준일: {overview.as_of ?? "-"}</div>
+          <div>종목 수: {overview.n_stocks}</div>
+          <div>
+            {benchLabel} 1일 수익률:{" "}
+            <span className={overview.market_return_1d >= 0 ? "pos" : "neg"}>
+              {overview.market_return_1d != null
+                ? (overview.market_return_1d * 100).toFixed(2) + "%"
+                : "-"}
+            </span>
+          </div>
+          <div className="muted">벤치마크: {overview.benchmark_source}</div>
         </div>
-      )}
+
+        {/* Search any stock (replaces the full list) */}
+        <StockSearch stocks={stocks} />
+
+        {/* Today's notable ML picks */}
+        <TopPicks initialRows={picks} initialHorizon={5} />
+
+        {index.length > 0 && (
+          <div className="card">
+            <h2>{benchLabel}</h2>
+            <IndexChart rows={index} name={benchLabel} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

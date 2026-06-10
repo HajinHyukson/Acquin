@@ -64,7 +64,13 @@ export const api = {
   },
   flows: (t: string) => getJson<any>(`/stocks/${t}/investor-flows?cumulative=true`),
   foreign: (t: string) => getJson<any[]>(`/stocks/${t}/foreign-holdings`),
-  projection: (t: string) => getJson<any>(`/stocks/${t}/projection`),
+  projection: (t: string, model?: string) =>
+    getJson<any>(`/stocks/${t}/projection${model ? `?model=${enc(model)}` : ""}`),
+  predictionAccuracy: (t: string, horizon = 5, model?: string) => {
+    const q = new URLSearchParams({ horizon: String(horizon) });
+    if (model) q.set("model", model);
+    return getJson<any>(`/stocks/${enc(t)}/prediction-accuracy?${q}`);
+  },
   correlations: (t: string) => getJson<any[]>(`/stocks/${t}/correlations`),
   events: (t: string, eventType: string) =>
     getJson<any>(`/stocks/${enc(t)}/events?event_type=${enc(eventType)}`),

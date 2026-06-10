@@ -170,6 +170,31 @@ def cmd_retrain(args) -> int:
     return 0
 
 
+def cmd_backtest(args) -> int:
+    from kospi_flow.ml.backtest import walk_forward_backtest
+
+    settings = _settings_with_overrides(args)
+    db = get_database(settings)
+    tickers = args.tickers.split(",") if args.tickers else None
+    horizons = (
+        [int(h) for h in args.horizons.split(",") if h.strip()]
+        if args.horizons
+        else [5]
+    )
+    for h in horizons:
+        stored = walk_forward_backtest(
+            db,
+            horizon=h,
+            tickers=tickers,
+            n_splits=args.splits,
+            min_train=args.min_train,
+            model_name=args.model_name,
+            settings=settings,
+        )
+        print(f"horizon={h} backtest_rows={stored}")
+    return 0
+
+
 def cmd_predict(args) -> int:
     from kospi_flow.ml.inference import predict_and_store
 
@@ -402,6 +427,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Train only; do not copy bundles into models/",
     )
     p_retrain.set_defaults(func=cmd_retrain)
+
+    p_bt = sub.add_parser(
+        "backtest",
+        help="Walk-forward backtest: store historical OOS predictions "
+        "(powers the stock-page accuracy panel)",
+    )
+    p_bt.add_argument(
+        "--horizons", default="5", help="Comma-separated horizons (default: 5)"
+    )
+    p_bt.add_argument(
+        "--splits", type=int, default=8, help="Walk-forward folds (more = more "
+        "history covered out-of-sample)"
+    )
+    p_bt.add_argument(
+        "--min-train", type=int, default=126, help="Minimum training dates "
+        "before the first test block"
+    )
+    p_bt.add_argument("--tickers", help="Comma-separated tickers (default: all)")
+    p_bt.add_argument("--model-name", help="Override base model name")
+    p_bt.set_defaults(func=cmd_backtest)
 
     p_pred = sub.add_parser("predict", help="Generate + store ML predictions")
     p_pred.add_argument("--horizon", type=int, default=5, help="Model horizon (days)")

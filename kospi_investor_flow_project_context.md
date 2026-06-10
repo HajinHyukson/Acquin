@@ -3,9 +3,9 @@
 **Project name:** KOSPI Investor Flow Intelligence Platform  
 **Primary market:** KOSPI  
 **Document purpose:** Reusable context document for coding-agent sessions  
-**Last updated:** 2026-06-06
-**Current phase:** MVP complete and **deployed**. Real KOSPI data loaded (948 tickers, ~5y), models trained, and production data served from Railway Postgres. Production split deployment is live: **Vercel** frontend at `https://acquin.vercel.app`, **Railway** FastAPI backend at `https://acquin-production.up.railway.app`, and Railway Postgres behind the API. A second Railway service (Option A scheduler) is wired for daily refresh. Remaining: API auth/rate limiting, ops maturity, and licensed-data/legal hardening.
-**Document version:** 0.7
+**Last updated:** 2026-06-09
+**Current phase:** MVP complete and **deployed**. Real KOSPI data loaded (948 tickers, ~5y), models trained, and production data served from Railway Postgres. Production split deployment is live: **Vercel** frontend at `https://acquin.vercel.app`, **Railway** FastAPI backend at `https://acquin-production.up.railway.app`, and Railway Postgres behind the API. A second Railway service (Option A scheduler) is wired for daily refresh. 2026-06-09 added: per-stock prediction-accuracy record (walk-forward backtest + stock-page panel), an external-model prediction socket (`POST /models/{name}/predictions`), and 2-column desktop layouts. Remaining: API auth/rate limiting, ops maturity, and licensed-data/legal hardening.
+**Document version:** 0.8
 
 ---
 
@@ -2010,6 +2010,81 @@ Next recommended task:
 
 ---
 
+### 2026-06-09 — Prediction-accuracy record, external-model socket, desktop grid layout
+
+Status:
+- Completed (code). Full suite green (`python -m pytest` → **125 passed**,
+  115 → 125). Frontend `npm run build` verified. **No schema change** — all new
+  rows reuse `fact_ml_prediction_daily` (its PK already includes `model_name`),
+  so the push deploys against the existing Railway Postgres with no migration
+  and no change to the daily scheduler pipeline.
+
+Summary (3 user asks, 2026-06-09 session):
+1. **Per-stock historical prediction-accuracy record** ("how accurate would the
+   model have been over the past 5 years?"): a walk-forward backtest stores the
+   per-(date,ticker) out-of-sample predictions that training previously threw
+   away; a new endpoint joins them with realized prices; the stock page shows a
+   band-vs-actual price ribbon + scorecard + rolling hit rate (user chose this
+   viz from 4 options).
+2. **Desktop layout**: home + stock pages now use a responsive 2-column grid
+   (1-column under 1100px, so mobile is unchanged); the three flow→return
+   analytics sub-charts sit in an internal 3-column row; `main` widened to
+   1500px. Much less vertical scrolling on PC.
+3. **External-model socket**: an authenticated
+   `POST /models/{name}/predictions` lets a separately developed model (e.g.
+   the planned investor-sentiment model) push predictions into the same table;
+   they surface on stock pages (grouped per model), in `top-picks?model=`, in
+   `/models` (backend `external`), and in the accuracy panel with the same
+   scoring as the internal model. Disabled until `KOSPI_INGEST_API_KEY` is set.
+
+Completed deliverables:
+- `kospi_flow/ml/backtest.py` (new): `walk_forward_backtest()` — leak-free folds
+  (embargo = horizon, honors `KOSPI_TRAIN_WINDOW_DAYS`), bulk-stores OOS rows
+  under `wf::<model>` in `fact_ml_prediction_daily`; re-run replaces.
+- `cli.py`: new `backtest` command (`--horizons/--splits/--min-train/--tickers`).
+- `api/routers/projection.py`: rewritten —
+  `GET /stocks/{t}/prediction-accuracy?horizon=&model=` (per-row
+  predicted vs realized log return, band prices, direction_hit, within_band;
+  summary hit rate / band coverage / MAE / RMSE / Spearman IC; rolling hit
+  rate); `GET /stocks/{t}/projection` now groups predictions per model family
+  (internal `gbm_return_*` = one family; `?model=` selects; back-compat
+  `projections` key kept) and always excludes `wf::` rows. Live rows win over
+  backtest rows on the same date in accuracy scoring.
+- `api/routers/models.py`: `POST /models/{name}/predictions` (X-API-Key guard;
+  403 when no key configured, 401 on mismatch; reserved prefixes `gbm_`/`wf::`
+  rejected; unknown tickers skipped + reported; upsert; auto-registers in
+  `ml_model_registry` as backend=external). `api/schemas.py`: payload models.
+- `api/routers/market.py`: `top-picks` now filters to the internal family by
+  default and accepts `?model=` (backtest rows can never leak into rankings).
+- `core/config.py` + `.env.example`: `KOSPI_INGEST_API_KEY` (default None =
+  endpoint disabled — safe for the current unauthenticated deployment).
+- Frontend: `components/charts/PredictionAccuracyChart.tsx` (new; ribbon +
+  scorecard + rolling hit-rate strip, horizon selector, helpful empty state);
+  stock page restructured into `.grid2` with per-model ML 예측 card + accuracy
+  card; home page grid; `globals.css` `.grid2/.grid3/.span2`; `lib/api.ts`
+  `predictionAccuracy()` + `projection(model?)`.
+- `docs/EXTERNAL_MODELS.md` (new): the push contract (log-return semantics,
+  walk-forward honesty requirement for backfilled history), enabling, surfaces.
+- Tests: `tests/test_accuracy.py` (+6) and `tests/test_external_models.py` (+5,
+  file-backed DB because `:memory:` doesn't cross the TestClient thread).
+
+Deployment notes (verified against the live pipelines):
+- No new tables/columns; no Alembic migration; `jobs/daily.py`/scheduler
+  untouched; existing prod behavior of projection/top-picks unchanged until
+  backtest rows or external models exist.
+- The accuracy panel shows an instructive empty state until the user runs
+  `python -m kospi_flow.cli backtest --horizons 5` (and optionally 1,3,10,20)
+  on the KR host against Railway Postgres. Footprint ≈ OOS panel size per
+  horizon (hundreds of MBs if all 5 horizons × full universe — start with 5d).
+- Ingest endpoint stays dark (403) until `KOSPI_INGEST_API_KEY` is set on
+  Railway.
+
+Next recommended task:
+- Still §20 DO NEXT #1: **API auth + rate limiting** for the read API (the new
+  write endpoint is key-guarded, the rest of the API is still open).
+
+---
+
 ## 17. Decision log
 
 | Date | Decision | Rationale |
@@ -2045,6 +2120,10 @@ Next recommended task:
 | 2026-06-06 | Move the final inference fit to a trailing **rolling window** (default off via `KOSPI_TRAIN_WINDOW_DAYS`) and add a **drift/age-triggered retrain** decision. | The real drift is regime-scale; rolling weights track the current regime and let stale relationships age out. Reuses the existing PSI monitor as the trigger. Code in §24. |
 | 2026-06-06 | Keep retrain **performance history in the DB (+ a small `metrics_history.csv`)**, not as versioned model blobs; keep the 5 `models/*.joblib` filenames **overwriting** in git. | Metrics rows are ~KB (free to keep forever); joblib bundles are ~24.5 MB/retrain and compress/diff poorly, so versioning them in git grows the repo permanently. History lives cheaply in Postgres/CSV; git ships only the latest bundle. See §24.3. |
 | 2026-06-06 | Retraining stays in **CI/local** (not in-prod); CI/local ships new bundles to Railway via commit→push→auto-deploy. | Railway bakes bundles into the image (ephemeral FS shadows any in-container retrain). In-prod auto-retrain would need a writable Volume (deferred). CI/local retrain matches the existing refresh flow. See §25 Phase D. |
+| 2026-06-09 | Historical (walk-forward backtest) predictions are stored in `fact_ml_prediction_daily` under a `wf::` model-name prefix — **no new table**. | The PK already includes `model_name`; one `notlike('wf::%')` filter keeps them out of live endpoints, and the accuracy endpoint scores live + backtest rows with the same code path. Zero-migration deploy. |
+| 2026-06-09 | Accuracy viz = **band-vs-actual price ribbon** + scorecard (direction hit rate, band coverage, MAE, IC) + rolling hit-rate strip. | User's pick from 4 mocked options: "did the price land inside what the model predicted" is the most intuitive framing of model quality for non-experts; the 50%-coin-flip reference keeps it honest. |
+| 2026-06-09 | External models integrate by **pushing predictions** (`POST /models/{name}/predictions`, X-API-Key) rather than running inside this repo. | The sentiment model trains elsewhere with its own features; the shared contract is only the *output* (log returns per horizon). Same table ⇒ projections, top-picks, and the accuracy scoring work for any model with zero extra wiring. Reserved prefixes `gbm_`/`wf::` protect the internal pipeline. |
+| 2026-06-09 | Desktop layout: CSS-grid 2-column dashboards at ≥1100px, single column below. | Vertical card stacking was PC-hostile (user request #2); a breakpointed grid keeps the mobile flow identical while halving desktop scroll. |
 ---
 
 ## 18. Known issues and technical debt
@@ -2140,9 +2219,9 @@ Use this brief to start the next coding-agent session.
 ```text
 You are working on the KOSPI Investor Flow Intelligence Platform.
 
-Read this context doc first (esp. the 2026-06-03 progress entries). The Phases
-0–5 MVP is CODE-COMPLETE and the app is DEPLOYED. 107 tests pass
-(`python -m pytest`; re-verified green 2026-06-06).
+Read this context doc first (esp. the 2026-06-03 + 2026-06-09 progress entries).
+The Phases 0–5 MVP is CODE-COMPLETE and the app is DEPLOYED. 125 tests pass
+(`python -m pytest`; re-verified green 2026-06-09).
 
 WHAT EXISTS
 - Backend: kospi_flow.{core,data,analytics,ml,api,jobs,alerts}. FastAPI
@@ -2179,16 +2258,16 @@ from the KR host (or a future licensed/KR-hosted ingestion service).
 
 DO NEXT (in order)
 1. **API auth + rate limiting** (BLOCKER for public exposure) — the URLs are
-   public and the API is unauthenticated (anyone can read/modify watchlists).
-   Add an API-key dependency (KOSPI_API_KEY setting) + simple rate limiting; have
-   the frontend send the key. This is the immediate §20-step-4 priority.
-2. **ML cadence + regime adaptation** (design recorded 2026-06-06 in §11.8;
-   paste-ready code in §24): (a) rolling-window training — fit the final bundle on
-   a trailing window via `KOSPI_TRAIN_WINDOW_DAYS` (§24.1); (b) drift-triggered
-   retrain — wire the existing PSI monitor to recommend/enqueue a retrain (§24.2).
-   Predict daily / retrain slow — do NOT retrain daily. Deployment caveat: in-prod
-   auto-retrain needs a writable model store; otherwise keep `retrain_on_drift=
-   false` in prod and retrain in CI/local → commit a new bundle → redeploy.
+   public and the read API is unauthenticated (anyone can read/modify
+   watchlists). Add an API-key dependency (KOSPI_API_KEY setting) + simple rate
+   limiting; have the frontend send the key. (The 2026-06-09 external-prediction
+   WRITE endpoint is already key-guarded via KOSPI_INGEST_API_KEY — pattern to
+   reuse.) This is the immediate priority.
+2. ~~ML cadence~~ DONE 2026-06-06 (§25 A–D). ~~Accuracy record / model socket /
+   desktop layout~~ DONE 2026-06-09 (see progress log). User runtime follow-ups,
+   not code: run `cli backtest --horizons 5` on the KR host so the accuracy
+   panel fills; set KOSPI_INGEST_API_KEY on Railway when the sentiment model is
+   ready (contract: docs/EXTERNAL_MODELS.md); tune KOSPI_TRAIN_WINDOW_DAYS.
 3. Rest of production maturity (§20 step 4): Airflow/Prefect scheduling, MLflow
    registry + automated retrain-on-drift, real alert channels (email/Kakao/
    Telegram), LicensedProvider for a licensed feed, legal/data-license sign-off.

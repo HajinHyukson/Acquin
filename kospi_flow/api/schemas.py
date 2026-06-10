@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from datetime import date
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from kospi_flow.core.enums import InvestorGroup
 
@@ -35,3 +37,33 @@ class WatchlistItemAdd(BaseModel):
     """Add-ticker-to-watchlist payload."""
 
     ticker: str = Field(min_length=6, max_length=6)
+
+
+class ExternalPredictionRow(BaseModel):
+    """One prediction from an external model (docs/EXTERNAL_MODELS.md).
+
+    Returns are log returns over ``horizon_days`` trading days, matching the
+    internal models. Only ``predicted_return`` is required; the band/probability
+    fields enrich the UI when the external model can provide them.
+    """
+
+    date: date
+    ticker: str = Field(min_length=6, max_length=6)
+    horizon_days: int = Field(ge=1, le=60)
+    predicted_return: float
+    predicted_price: float | None = None
+    predicted_return_p10: float | None = None
+    predicted_return_p50: float | None = None
+    predicted_return_p90: float | None = None
+    prob_outperform_kospi: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ExternalPredictionsPayload(BaseModel):
+    """Batch upsert of external-model predictions."""
+
+    # Allow the ``model_version`` field name (pydantic reserves ``model_``).
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_version: str = Field(default="v1", min_length=1, max_length=64)
+    feature_version: str | None = None
+    predictions: list[ExternalPredictionRow] = Field(min_length=1, max_length=20000)
